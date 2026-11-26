@@ -1,0 +1,27 @@
+# Maintainer: TheElevatedOne <adam.mlady@elevated.ovh>
+
+pkgname=7zipl-bin
+_pkgname=7zipl
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='7-Zip File Manager for Linux with a plain GTK 4 interface, on the 7-Zip engine (prebuilt)'
+arch=('x86_64')
+url='https://github.com/TheElevatedOne/7zipl'
+license=('LGPL-2.1-or-later' 'BSD-3-Clause' 'LicenseRef-UnRAR')
+depends=('gcc-libs' 'glibc' 'glib2' 'gtk4' 'pango' 'cairo')
+optdepends=('xdg-utils: open files from archives with their application')
+provides=("7zipl=$pkgver")
+conflicts=('7zipl')
+# The release binary is built on Arch Linux by the GitHub workflow and already stripped.
+options=('!debug' '!strip')
+# Release tags have no "v" prefix. Run updpkgsums after the release is published.
+source_x86_64=("$url/releases/download/$pkgver/$_pkgname-$pkgver-linux-x86_64.tar.gz")
+sha256sums_x86_64=('SKIP')
+
+package() {
+  cd "$_pkgname-$pkgver-linux-$CARCH"
+  install -Dm755 bin/7zipl -t "$pkgdir/usr/bin"
+  find share -type f -exec install -Dm644 {} "$pkgdir/usr/{}" \;
+  install -Dm644 CHANGELOG.md -t "$pkgdir/usr/share/doc/$_pkgname"
+  install -Dm644 License.txt unRarLicense.txt -t "$pkgdir/usr/share/licenses/$pkgname"
+}

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- 7zipl: a box with a zipper -->
+  <rect x="14" y="22" width="100" height="88" fill="#3a6ea5"/>
+  <rect x="14" y="22" width="100" height="18" fill="#2b5582"/>
+  <rect x="58" y="22" width="12" height="88" fill="#e8e8e8"/>
+  <g fill="#3a6ea5">
+    <rect x="58" y="46" width="6" height="5"/><rect x="64" y="53" width="6" height="5"/>
+    <rect x="58" y="60" width="6" height="5"/><rect x="64" y="67" width="6" height="5"/>
+    <rect x="58" y="74" width="6" height="5"/><rect x="64" y="81" width="6" height="5"/>
+  </g>
+  <rect x="54" y="88" width="20" height="14" fill="#f2c14e"/>
+  <rect x="60" y="102" width="8" height="10" fill="#f2c14e"/>
+  <text x="36" y="84" font-family="sans-serif" font-weight="bold" font-size="30" fill="#ffffff" text-anchor="middle">7</text>
+  <text x="92" y="84" font-family="sans-serif" font-weight="bold" font-size="30" fill="#ffffff" text-anchor="middle">z</text>
+</svg>

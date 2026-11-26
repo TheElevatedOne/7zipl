@@ -1,0 +1,6 @@
+/build*/
+/dist/
+aur/*/src/
+aur/*/pkg/
+aur/*/7zipl/
+aur/*/*.tar.*
