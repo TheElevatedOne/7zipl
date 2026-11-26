@@ -704,6 +704,8 @@ ArchiveListing open_archive(const std::string &path, Ui &ui, const std::string &
         op.codecs = g_codecs;
         op.types = &types;
         op.excludedFormats = &excluded;
+        CObjectVector<CProperty> no_props;
+        op.props = &no_props;  // COpenOptions leaves it uninitialised
         op.stdInMode = false;
         op.filePath = s2u(path);
         OpenCallback cb(ctx);
@@ -970,6 +972,8 @@ Result extract_items(const ExtractRequest &req, Ui &ui)
         op.codecs = g_codecs;
         op.types = &types;
         op.excludedFormats = &excluded;
+        CObjectVector<CProperty> no_props;
+        op.props = &no_props;  // COpenOptions leaves it uninitialised
         op.filePath = s2u(req.archive);
         ui.set_current("Opening", req.archive);
         hr = link.Open3(op, ecs);
