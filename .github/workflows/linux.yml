@@ -21,7 +21,7 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          pacman -Syu --noconfirm --needed git cmake ninja gtk4 desktop-file-utils appstream dbus adwaita-icon-theme
+          pacman -Syu --noconfirm --needed git cmake ninja gtk4 desktop-file-utils appstream dbus adwaita-icon-theme gdb
 
       - uses: actions/checkout@v5
 
@@ -37,7 +37,7 @@ jobs:
 
       - name: Build
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_INSTALL_PREFIX=/usr
           cmake --build build
 
       - name: Test
@@ -50,7 +50,10 @@ jobs:
           chown -R tester build
           su tester -c 'export XDG_RUNTIME_DIR=$(mktemp -d); gtk4-broadwayd :5 & sleep 2; \
             GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 GDK_DEBUG=no-portals \
-            dbus-run-session -- timeout 300 ./build/7zipl --selftest'
+            dbus-run-session -- timeout 300 ./build/7zipl --selftest || { \
+            echo "::error::self-test failed; backtrace:"; \
+            GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 GDK_DEBUG=no-portals dbus-run-session -- timeout 300 \
+            gdb -q -batch -ex run -ex "thread apply all bt 25" --args ./build/7zipl --selftest; exit 1; }'
 
       - name: Package
         run: packaging/make-release-tarball.sh build "${{ steps.version.outputs.version }}" x86_64

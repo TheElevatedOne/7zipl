@@ -52,7 +52,7 @@ public:
     {
         return Overwrite::YesAll;
     }
-    void message(Level, const std::string &) override {}
+    void message(Level, const std::string &m) override { std::fprintf(stderr, "  engine: %s\n", m.c_str()); }
 };
 
 bool has_entry(const ArchiveListing &l, const std::string &path)
