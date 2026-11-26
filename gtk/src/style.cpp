@@ -66,6 +66,25 @@ gridview.szl-list.inactive > child:selected {
 .szl-messages, .szl-hash { font-family: monospace; }
 .szl-mono { font-family: monospace; }
 .szl-warning { color: @szl_error; }
+
+/* Menus and other popovers: GTK 4 paints popover > contents, not the popover node that pywal-style
+   sheets colour, so those stay in the built-in theme's colours unless painted here. */
+popover > contents,
+popover > arrow {
+  background-color: @szl_popover_bg;
+  color: @szl_popover_fg;
+  border: 1px solid mix(@szl_popover_bg, @szl_popover_fg, 0.18);
+  box-shadow: none;
+}
+popover > contents { padding: 2px; }
+popover.menu modelbutton:hover,
+popover.menu modelbutton:selected {
+  background-color: @szl_accent_bg;
+  color: @szl_accent_fg;
+}
+popover.menu modelbutton:hover accelerator,
+popover.menu modelbutton:selected accelerator { color: @szl_accent_fg; }
+popover.menu separator { background-color: mix(@szl_popover_bg, @szl_popover_fg, 0.18); }
 )css";
 
 void load_style()
@@ -82,6 +101,8 @@ void load_style()
         {"szl_window_fg", {"window_fg_color", "theme_fg_color", nullptr}, "#000000"},
         {"szl_accent_bg", {"accent_bg_color", "theme_selected_bg_color", nullptr}, "#3584e4"},
         {"szl_accent_fg", {"accent_fg_color", "theme_selected_fg_color", nullptr}, "#ffffff"},
+        {"szl_popover_bg", {"popover_bg_color", "window_bg_color", "theme_bg_color"}, "#ffffff"},
+        {"szl_popover_fg", {"popover_fg_color", "window_fg_color", "theme_fg_color"}, "#000000"},
         {"szl_error", {"error_color", "error_bg_color", nullptr}, "#c01c28"},
     };
     GtkWidget *probe = gtk_label_new(nullptr);
