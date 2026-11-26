@@ -94,9 +94,30 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "7zipl: no files given\n");
         return 2;
     }
-    if (o.mode == szl::Mode::SelfTest && !gtk_init_check()) {
-        std::fprintf(stderr, "7zipl: no display, self-test skipped\n");
-        return 77;
+    // The self-test writes settings, a desktop entry, default applications and context menus: give it its own
+    // XDG home so the user's real ones are never touched.
+    std::string sandbox;
+    if (o.mode == szl::Mode::SelfTest) {
+        char *d = g_dir_make_tmp("7zipl-selftest-XXXXXX", nullptr);
+        if (!d) {
+            std::fprintf(stderr, "7zipl: cannot create a temporary folder\n");
+            return 1;
+        }
+        sandbox = d;
+        g_free(d);
+        for (const char *v : {"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"}) {
+            const std::string p = sandbox + "/" + v;
+            g_mkdir_with_parents(p.c_str(), 0700);
+            g_setenv(v, p.c_str(), TRUE);
+        }
+        szl::set_config_dir(sandbox + "/XDG_CONFIG_HOME/7zipl");
+        if (!gtk_init_check()) {
+            std::fprintf(stderr, "7zipl: no display, self-test skipped\n");
+            szl::remove_tree(sandbox);
+            return 77;
+        }
     }
-    return szl::run_app(argv[0], o);
+    const int rc = szl::run_app(argv[0], o);
+    if (!sandbox.empty()) szl::remove_tree(sandbox);
+    return rc;
 }

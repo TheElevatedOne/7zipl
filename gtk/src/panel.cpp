@@ -6,6 +6,8 @@
 #include "settings.hpp"
 #include "util.hpp"
 
+#include <glib/gstdio.h>
+
 #include <algorithm>
 #include <set>
 #include <unordered_map>
@@ -60,11 +62,12 @@ enum Col {
     C_USER,
     C_GROUP,
     C_LINK,
+    C_TYPE,  // the extension, for View > Arrange by Type (not shown)
     C_COUNT
 };
 const char *const kColTitles[C_COUNT] = {"Name",   "Size",     "Packed Size", "Modified", "Created", "Accessed",
                                          "Attributes", "Encrypted", "Method", "CRC", "Comment", "Folders",
-                                         "Files", "User", "Group", "Link"};
+                                         "Files", "User", "Group", "Link", "Type"};
 
 const Row *row_of(gpointer item) { return item ? SZL_ROW(item)->row : nullptr; }
 
@@ -123,6 +126,11 @@ std::string col_text(const Row &r, int col)
     case C_USER: return r.user;
     case C_GROUP: return r.group;
     case C_LINK: return r.link;
+    case C_TYPE: {
+        if (r.dir) return {};
+        const auto dot = r.name.rfind('.');
+        return dot == std::string::npos || dot == 0 ? std::string() : r.name.substr(dot + 1);
+    }
     default: return "";
     }
 }
@@ -166,6 +174,7 @@ GIcon *icon_for(const Row &r)
     static std::unordered_map<std::string, GIcon *> cache;
     if (r.up) return g_themed_icon_new("go-up");
     if (r.dir) return g_themed_icon_new("folder");
+    if (!szl::settings().real_icons) return g_themed_icon_new("text-x-generic");
     std::string ct = r.content_type;
     if (ct.empty()) {
         char *g = g_content_type_guess(r.name.c_str(), nullptr, 0, nullptr);
@@ -217,6 +226,47 @@ void bind_cell(GtkSignalListItemFactory *, GtkListItem *li, gpointer data)
     } else {
         gtk_label_set_text(GTK_LABEL(child), col_text(*r, col).c_str());
     }
+}
+
+// Large Icons (icon above the name), Small Icons and List (icon left of the name).
+void setup_tile(GtkSignalListItemFactory *, GtkListItem *li, gpointer data)
+{
+    const bool large = GPOINTER_TO_INT(data) == 0;
+    GtkWidget *box = gtk_box_new(large ? GTK_ORIENTATION_VERTICAL : GTK_ORIENTATION_HORIZONTAL, large ? 2 : 6);
+    GtkWidget *img = gtk_image_new();
+    gtk_image_set_pixel_size(GTK_IMAGE(img), large ? 48 : 16);
+    GtkWidget *l = gtk_label_new(nullptr);
+    if (large) {
+        gtk_label_set_wrap(GTK_LABEL(l), TRUE);
+        gtk_label_set_wrap_mode(GTK_LABEL(l), PANGO_WRAP_WORD_CHAR);
+        gtk_label_set_lines(GTK_LABEL(l), 2);
+        gtk_label_set_justify(GTK_LABEL(l), GTK_JUSTIFY_CENTER);
+        gtk_label_set_width_chars(GTK_LABEL(l), 12);
+        gtk_label_set_max_width_chars(GTK_LABEL(l), 12);
+    } else {
+        gtk_label_set_xalign(GTK_LABEL(l), 0);
+        gtk_label_set_width_chars(GTK_LABEL(l), 24);
+        gtk_label_set_max_width_chars(GTK_LABEL(l), 24);
+    }
+    gtk_label_set_ellipsize(GTK_LABEL(l), PANGO_ELLIPSIZE_END);
+    gtk_box_append(GTK_BOX(box), img);
+    gtk_box_append(GTK_BOX(box), l);
+    gtk_list_item_set_child(li, box);
+}
+
+void bind_tile(GtkSignalListItemFactory *, GtkListItem *li, gpointer)
+{
+    const Row *r = row_of(gtk_list_item_get_item(li));
+    if (!r) return;
+    GtkWidget *box = gtk_list_item_get_child(li);
+    GtkWidget *img = gtk_widget_get_first_child(box);
+    GtkWidget *l = gtk_widget_get_next_sibling(img);
+    GIcon *ic = icon_for(*r);
+    gtk_image_set_from_gicon(GTK_IMAGE(img), ic);
+    g_object_unref(ic);
+    gtk_label_set_text(GTK_LABEL(l), r->up ? ".." : r->name.c_str());
+    gtk_widget_set_opacity(img, r->hidden ? 0.55 : 1.0);
+    gtk_widget_set_tooltip_text(box, r->up ? nullptr : r->name.c_str());
 }
 
 int sort_func(gconstpointer a, gconstpointer b, gpointer data)
@@ -378,6 +428,26 @@ Panel::Panel()
     gtk_column_view_set_model(GTK_COLUMN_VIEW(view_), GTK_SELECTION_MODEL(sel_));
     gtk_column_view_set_reorderable(GTK_COLUMN_VIEW(view_), TRUE);
 
+    grid_ = gtk_grid_view_new(nullptr, nullptr);
+    g_object_ref_sink(grid_);
+    gtk_widget_add_css_class(grid_, "szl-list");
+    gtk_grid_view_set_max_columns(GTK_GRID_VIEW(grid_), 64);
+    g_signal_connect(grid_, "activate", CB([](GtkGridView *, guint pos, Panel *p) {
+                         SzlRow *o = SZL_ROW(g_list_model_get_item(G_LIST_MODEL(p->sorted_), pos));
+                         if (!o) return;
+                         Row r = *o->row;
+                         g_object_unref(o);
+                         p->activate(GTK_WINDOW(gtk_widget_get_root(p->scroller_)), r);
+                     }),
+                     this);
+    for (GtkWidget *v : {view_, grid_}) {
+        GtkEventController *fc = gtk_event_controller_focus_new();
+        g_signal_connect_swapped(fc, "enter", CB([](Panel *p) {
+                                     if (p->on_focus) p->on_focus();
+                                 }),
+                                 this);
+        gtk_widget_add_controller(v, fc);
+    }
     g_signal_connect(view_, "activate", CB([](GtkColumnView *, guint pos, Panel *p) {
                          SzlRow *o = SZL_ROW(g_list_model_get_item(G_LIST_MODEL(p->sorted_), pos));
                          if (!o) return;
@@ -393,6 +463,7 @@ Panel::Panel()
                      this);
 
     // Files dropped on the list: copied into the folder, or added to the archive.
+    for (GtkWidget *target : {view_, grid_}) {
     GtkDropTarget *drop = gtk_drop_target_new(GDK_TYPE_FILE_LIST, GDK_ACTION_COPY);
     g_signal_connect(drop, "drop", CB([](GtkDropTarget *, const GValue *v, double, double, Panel *p) -> gboolean {
                          if (!G_VALUE_HOLDS(v, GDK_TYPE_FILE_LIST)) return FALSE;
@@ -407,7 +478,7 @@ Panel::Panel()
                          return TRUE;
                      }),
                      this);
-    gtk_widget_add_controller(view_, GTK_EVENT_CONTROLLER(drop));
+    gtk_widget_add_controller(target, GTK_EVENT_CONTROLLER(drop));
 
     // Dragging files out of a folder on disk.
     GtkDragSource *drag = gtk_drag_source_new();
@@ -424,9 +495,11 @@ Panel::Panel()
                          return cp;
                      }),
                      this);
-    gtk_widget_add_controller(view_, GTK_EVENT_CONTROLLER(drag));
+    gtk_widget_add_controller(target, GTK_EVENT_CONTROLLER(drag));
+    }
 
     // Backspace goes up, like 7-Zip FM.
+    for (GtkWidget *target : {view_, grid_}) {
     GtkEventController *keys = gtk_event_controller_key_new();
     g_signal_connect(keys, "key-pressed", CB([](GtkEventControllerKey *, guint key, guint, GdkModifierType mods, Panel *p) -> gboolean {
                          if (key == GDK_KEY_BackSpace && !(mods & (GDK_CONTROL_MASK | GDK_ALT_MASK))) {
@@ -436,19 +509,28 @@ Panel::Panel()
                          return FALSE;
                      }),
                      this);
-    gtk_widget_add_controller(view_, keys);
+    gtk_widget_add_controller(target, keys);
+    }
 
-    GtkWidget *sw = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(sw), view_);
-    gtk_widget_set_vexpand(sw, TRUE);
-    gtk_widget_set_hexpand(sw, TRUE);
-    root_ = sw;
+    g_object_ref_sink(view_);
+    scroller_ = gtk_scrolled_window_new();
+    gtk_widget_set_vexpand(scroller_, TRUE);
+    gtk_widget_set_hexpand(scroller_, TRUE);
+    root_ = scroller_;
     g_object_ref(root_);
+    set_view_mode(settings().view_mode);
     apply_view_settings();
 }
 
 Panel::~Panel()
 {
+    if (monitor_timer_) g_source_remove(monitor_timer_);
+    if (monitor_) {
+        g_file_monitor_cancel(monitor_);
+        g_object_unref(monitor_);
+    }
+    g_object_unref(view_);
+    g_object_unref(grid_);
     g_object_unref(sel_);
     g_object_unref(sorted_);
     g_object_unref(store_);
@@ -457,7 +539,7 @@ Panel::~Panel()
 
 void Panel::build_columns()
 {
-    static const int widths[C_COUNT] = {260, 100, 100, 150, 150, 150, 90, 70, 110, 80, 120, 70, 70, 80, 80, 140};
+    static const int widths[C_COUNT] = {260, 100, 100, 150, 150, 150, 90, 70, 110, 80, 120, 70, 70, 80, 80, 140, 60};
     for (int c = 0; c < C_COUNT; c++) {
         GtkListItemFactory *f = gtk_signal_list_item_factory_new();
         g_signal_connect(f, "setup", G_CALLBACK(setup_cell), GINT_TO_POINTER(c));
@@ -528,6 +610,7 @@ void Panel::update_column_visibility()
     } else {
         has[C_SIZE] = has[C_MTIME] = has[C_CTIME] = has[C_ATTRIB] = true;
     }
+    has[C_TYPE] = false;
     for (int c = 0; c < C_COUNT; c++) gtk_column_view_column_set_visible(cols_[c], has[c]);
 }
 
@@ -553,16 +636,51 @@ void Panel::set_rows(std::vector<Row> rows, const std::string &select)
     if (!select.empty()) {
         select_name(select);
     } else if (g_list_model_get_n_items(G_LIST_MODEL(sorted_)) > 0) {
-        gtk_column_view_scroll_to(GTK_COLUMN_VIEW(view_), 0, nullptr, GTK_LIST_SCROLL_FOCUS, nullptr);
+        scroll_to(0, GTK_LIST_SCROLL_FOCUS);
         gtk_selection_model_unselect_all(GTK_SELECTION_MODEL(sel_));
     }
     if (on_location_changed) on_location_changed();
     if (on_selection_changed) on_selection_changed();
 }
 
+void Panel::collect_flat(std::vector<Row> &rows, const std::string &dir, const std::string &rel, int depth)
+{
+    if (depth > 64 || rows.size() > 200000) return;
+    GDir *d = g_dir_open(dir.c_str(), 0, nullptr);
+    if (!d) return;
+    const char *n;
+    while ((n = g_dir_read_name(d))) {
+        const std::string full = path_join(dir, n), name = rel.empty() ? std::string(n) : rel + "/" + n;
+        GStatBuf st;
+        if (g_lstat(full.c_str(), &st) != 0) continue;
+        if (!show_hidden_ && n[0] == '.') continue;
+        if (S_ISDIR(st.st_mode)) {
+            collect_flat(rows, full, name, depth + 1);
+            continue;
+        }
+        Row r;
+        r.name = name;
+        r.full = full;
+        r.has_size = true;
+        r.size = (uint64_t)st.st_size;
+        r.has_mtime = true;
+        r.mtime = st.st_mtime;
+        r.attrib = mode_string(st.st_mode, false, S_ISLNK(st.st_mode));
+        r.is_link = S_ISLNK(st.st_mode);
+        rows.push_back(std::move(r));
+    }
+    g_dir_close(d);
+}
+
 void Panel::fill_fs()
 {
     std::vector<Row> rows;
+    if (flat_) {
+        collect_flat(rows, fs_dir_, {}, 0);
+        set_rows(std::move(rows), {});
+        watch();
+        return;
+    }
     GFile *dir = g_file_new_for_path(fs_dir_.c_str());
     GError *err = nullptr;
     GFileEnumerator *en = g_file_enumerate_children(
@@ -619,6 +737,7 @@ void Panel::fill_fs()
     }
     g_object_unref(dir);
     set_rows(std::move(rows), {});
+    watch();
 }
 
 void Panel::fill_archive()
@@ -630,8 +749,29 @@ void Panel::fill_archive()
         prefix_.clear();
         idx = 0;
     }
-    for (size_t c : a.nodes[(size_t)idx].children) rows.push_back(a.nodes[c].row);
+    if (flat_) {
+        // Every file below the folder, named by its path from here.
+        std::vector<std::pair<size_t, std::string>> stack = {{(size_t)idx, std::string()}};
+        while (!stack.empty()) {
+            auto [n, rel] = stack.back();
+            stack.pop_back();
+            for (size_t c : a.nodes[n].children) {
+                const Row &cr = a.nodes[c].row;
+                const std::string name = rel.empty() ? cr.name : rel + "/" + cr.name;
+                if (cr.dir) {
+                    stack.emplace_back(c, name);
+                } else {
+                    Row r = cr;
+                    r.name = name;
+                    rows.push_back(std::move(r));
+                }
+            }
+        }
+    } else {
+        for (size_t c : a.nodes[(size_t)idx].children) rows.push_back(a.nodes[c].row);
+    }
     set_rows(std::move(rows), {});
+    watch();
 }
 
 void Panel::navigate_fs(const std::string &dir, const std::string &select)
@@ -648,14 +788,14 @@ void Panel::navigate_fs(const std::string &dir, const std::string &select)
 }
 
 void Panel::open_archive(GtkWindow *parent, const std::string &file, const std::string &inner,
-                         std::function<void(bool)> done)
+                         std::function<void(bool)> done, const std::string &type)
 {
-    open_level(parent, file, file, inner, false, {}, std::move(done));
+    open_level(parent, file, file, inner, false, {}, std::move(done), type);
 }
 
 void Panel::open_level(GtkWindow *parent, const std::string &file, const std::string &virtual_path,
                        const std::string &inner, bool nested, const std::string &name_in_parent,
-                       std::function<void(bool)> done)
+                       std::function<void(bool)> done, const std::string &type)
 {
     if (busy_) return;
     busy_ = true;
@@ -669,8 +809,8 @@ void Panel::open_level(GtkWindow *parent, const std::string &file, const std::st
     const std::string password = spec.password;
     start_job(
         parent, spec,
-        [file, listing, password](Ui &ui) {
-            *listing = szl::open_archive(file, ui, password);
+        [file, listing, password, type](Ui &ui) {
+            *listing = szl::open_archive(file, ui, password, type);
             Result r;
             r.ok = listing->ok;
             r.cancelled = listing->cancelled;
@@ -1027,14 +1167,13 @@ void Panel::select_name(const std::string &name)
         const bool eq = !o->row->up && o->row->name == name;
         g_object_unref(o);
         if (eq) {
-            gtk_column_view_scroll_to(GTK_COLUMN_VIEW(view_), i, nullptr,
-                                      (GtkListScrollFlags)(GTK_LIST_SCROLL_FOCUS | GTK_LIST_SCROLL_SELECT), nullptr);
+            scroll_to(i, (GtkListScrollFlags)(GTK_LIST_SCROLL_FOCUS | GTK_LIST_SCROLL_SELECT));
             return;
         }
     }
 }
 
-void Panel::focus() { gtk_widget_grab_focus(view_); }
+void Panel::focus() { gtk_widget_grab_focus(current_view()); }
 
 std::string Panel::status_text() const
 {
@@ -1065,6 +1204,167 @@ std::string Panel::status_text() const
 void Panel::set_show_hidden(bool v)
 {
     show_hidden_ = v;
+}
+
+}  // namespace szl
+
+namespace szl {
+
+void Panel::scroll_to(guint pos, GtkListScrollFlags flags)
+{
+    if (view_mode_ == 3)
+        gtk_column_view_scroll_to(GTK_COLUMN_VIEW(view_), pos, nullptr, flags, nullptr);
+    else
+        gtk_grid_view_scroll_to(GTK_GRID_VIEW(grid_), pos, flags, nullptr);
+}
+
+void Panel::set_view_mode(int mode)
+{
+    view_mode_ = mode < 0 || mode > 3 ? 3 : mode;
+    if (view_mode_ == 3) {
+        gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller_), view_);
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller_), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+        gtk_column_view_set_model(GTK_COLUMN_VIEW(view_), GTK_SELECTION_MODEL(sel_));
+        gtk_grid_view_set_model(GTK_GRID_VIEW(grid_), nullptr);
+        return;
+    }
+    GtkListItemFactory *f = gtk_signal_list_item_factory_new();
+    g_signal_connect(f, "setup", G_CALLBACK(setup_tile), GINT_TO_POINTER(view_mode_));
+    g_signal_connect(f, "bind", G_CALLBACK(bind_tile), nullptr);
+    gtk_grid_view_set_factory(GTK_GRID_VIEW(grid_), f);
+    g_object_unref(f);
+    gtk_column_view_set_model(GTK_COLUMN_VIEW(view_), nullptr);
+    gtk_grid_view_set_model(GTK_GRID_VIEW(grid_), GTK_SELECTION_MODEL(sel_));
+    gtk_grid_view_set_min_columns(GTK_GRID_VIEW(grid_), 1);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller_), grid_);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller_), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+}
+
+void Panel::sort_by(int column)
+{
+    if (column < 0 || column >= (int)cols_.size()) {
+        gtk_column_view_sort_by_column(GTK_COLUMN_VIEW(view_), nullptr, GTK_SORT_ASCENDING);
+        settings().sort_column = -1;
+        return;
+    }
+    gtk_column_view_sort_by_column(GTK_COLUMN_VIEW(view_), cols_[(size_t)column], GTK_SORT_ASCENDING);
+}
+
+void Panel::set_flat(bool flat)
+{
+    if (flat == flat_) return;
+    flat_ = flat;
+    if (in_archive())
+        fill_archive();
+    else
+        fill_fs();
+}
+
+void Panel::set_active(bool active)
+{
+    for (GtkWidget *v : {view_, grid_}) {
+        if (active)
+            gtk_widget_remove_css_class(v, "inactive");
+        else
+            gtk_widget_add_css_class(v, "inactive");
+    }
+}
+
+bool Panel::has_focus() const
+{
+    GtkRoot *root = gtk_widget_get_root(scroller_);
+    if (!root) return false;
+    GtkWidget *f = gtk_root_get_focus(root);
+    return f && (f == view_ || f == grid_ || gtk_widget_is_ancestor(f, scroller_));
+}
+
+void Panel::select_by_type(bool select)
+{
+    auto f = focused();
+    if (!f) return;
+    const auto dot = f->name.rfind('.');
+    const std::string mask = f->dir ? std::string() : (dot == std::string::npos || dot == 0 ? std::string() : "*" + f->name.substr(dot));
+    const bool dir = f->dir;
+    const guint n = g_list_model_get_n_items(G_LIST_MODEL(sorted_));
+    for (guint i = 0; i < n; i++) {
+        SzlRow *o = SZL_ROW(g_list_model_get_item(G_LIST_MODEL(sorted_), i));
+        const Row &r = *o->row;
+        bool match = false;
+        if (!r.up) {
+            if (dir) match = r.dir;
+            else if (mask.empty()) match = !r.dir && (r.name.rfind('.') == std::string::npos || r.name.rfind('.') == 0);
+            else match = !r.dir && mask_match(mask, r.name);
+        }
+        g_object_unref(o);
+        if (!match) continue;
+        if (select)
+            gtk_selection_model_select_item(GTK_SELECTION_MODEL(sel_), i, FALSE);
+        else
+            gtk_selection_model_unselect_item(GTK_SELECTION_MODEL(sel_), i);
+    }
+}
+
+void Panel::watch()
+{
+    if (monitor_timer_) {
+        g_source_remove(monitor_timer_);
+        monitor_timer_ = 0;
+    }
+    if (monitor_) {
+        g_file_monitor_cancel(monitor_);
+        g_object_unref(monitor_);
+        monitor_ = nullptr;
+    }
+    if (!settings().auto_refresh || flat_) return;
+    // A folder: its entries. An archive: the archive file (changed by another program).
+    const bool arch = in_archive();
+    if (arch && levels_.size() > 1) return;  // nested archives are temporary copies
+    GFile *f = g_file_new_for_path(arch ? arc().file.c_str() : fs_dir_.c_str());
+    monitor_ = arch ? g_file_monitor_file(f, G_FILE_MONITOR_WATCH_MOVES, nullptr, nullptr)
+                    : g_file_monitor_directory(f, G_FILE_MONITOR_WATCH_MOVES, nullptr, nullptr);
+    g_object_unref(f);
+    if (!monitor_) return;
+    g_signal_connect(monitor_, "changed", CB([](GFileMonitor *, GFile *, GFile *, GFileMonitorEvent ev, Panel *p) {
+                         if (ev == G_FILE_MONITOR_EVENT_CHANGES_DONE_HINT && !p->in_archive()) return;
+                         if (p->monitor_timer_) g_source_remove(p->monitor_timer_);
+                         // Coalesce bursts (a program writing many files) into one refresh.
+                         p->monitor_timer_ = g_timeout_add(400, [](gpointer pp) -> gboolean {
+                             auto *p = static_cast<Panel *>(pp);
+                             p->monitor_timer_ = 0;
+                             if (!p->busy_ && running_jobs() == 0)
+                                 p->refresh(GTK_WINDOW(gtk_widget_get_root(p->scroller_)));
+                             return G_SOURCE_REMOVE;
+                         }, p);
+                     }),
+                     this);
+}
+
+void Panel::extract_to_temp(GtkWindow *parent, const std::vector<Row> &rows,
+                            std::function<void(const std::vector<std::string> &)> done)
+{
+    if (!in_archive() || rows.empty()) return;
+    const std::string tmp = make_temp_dir("open");
+    if (tmp.empty()) return;
+    ExtractRequest req;
+    req.archive = arc().file;
+    req.out_dir = tmp;
+    req.overwrite = 1;
+    req.path_mode = 1;  // no paths: flat view names may contain folders
+    req.password = arc().password;
+    std::vector<std::string> out;
+    for (const Row &r : rows) {
+        req.items.push_back(r.full);
+        out.push_back(path_join(tmp, path_basename(r.full)));
+    }
+    JobSpec spec;
+    spec.title = "Extracting";
+    spec.archive = arc().file;
+    spec.show_delay_ms = 500;
+    spec.password = arc().password;
+    start_job(parent, spec, [req](Ui &ui) { return extract_items(req, ui); },
+              [out, done](const Result &r) {
+                  if (r.ok) done(out);
+              });
 }
 
 }  // namespace szl

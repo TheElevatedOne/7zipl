@@ -123,6 +123,22 @@ void Settings::load()
     extract.subfolder = get_b(k, "Extract", "Subfolder", extract.subfolder);
     extract.elim_dup = get_b(k, "Extract", "ElimDup", extract.elim_dup);
     hash_method = get_s(k, "Tools", "HashMethod", hash_method);
+    work_mode = get_i(k, "Folders", "WorkMode", work_mode);
+    work_dir = get_s(k, "Folders", "WorkDir", work_dir);
+    viewer = get_s(k, "Editor", "Viewer", viewer);
+    editor = get_s(k, "Editor", "Editor", editor);
+    diff = get_s(k, "Editor", "Diff", diff);
+    real_icons = get_b(k, "View", "RealIcons", real_icons);
+    mem_limit = get_b(k, "Settings", "MemLimit", mem_limit);
+    mem_limit_gb = std::max(1, get_i(k, "Settings", "MemLimitGB", mem_limit_gb));
+    ctx_items = (unsigned)get_i(k, "ContextMenu", "Items", (int)ctx_items);
+    ctx_cascaded = get_b(k, "ContextMenu", "Cascaded", ctx_cascaded);
+    view_mode = std::clamp(get_i(k, "View", "Mode", view_mode), 0, 3);
+    two_panels = get_b(k, "View", "TwoPanels", two_panels);
+    auto_refresh = get_b(k, "View", "AutoRefresh", auto_refresh);
+    large_buttons = get_b(k, "View", "LargeButtons", large_buttons);
+    last_folder2 = get_s(k, "View", "LastFolder2", last_folder2);
+    folder_history = get_list(k, "History", "Folders");
     g_key_file_free(k);
 }
 
@@ -167,11 +183,34 @@ void Settings::save() const
     g_key_file_set_boolean(k, "Extract", "Subfolder", extract.subfolder);
     g_key_file_set_boolean(k, "Extract", "ElimDup", extract.elim_dup);
     g_key_file_set_string(k, "Tools", "HashMethod", hash_method.c_str());
+    g_key_file_set_integer(k, "Folders", "WorkMode", work_mode);
+    g_key_file_set_string(k, "Folders", "WorkDir", work_dir.c_str());
+    g_key_file_set_string(k, "Editor", "Viewer", viewer.c_str());
+    g_key_file_set_string(k, "Editor", "Editor", editor.c_str());
+    g_key_file_set_string(k, "Editor", "Diff", diff.c_str());
+    g_key_file_set_boolean(k, "View", "RealIcons", real_icons);
+    g_key_file_set_boolean(k, "Settings", "MemLimit", mem_limit);
+    g_key_file_set_integer(k, "Settings", "MemLimitGB", mem_limit_gb);
+    g_key_file_set_integer(k, "ContextMenu", "Items", (int)ctx_items);
+    g_key_file_set_boolean(k, "ContextMenu", "Cascaded", ctx_cascaded);
+    g_key_file_set_integer(k, "View", "Mode", view_mode);
+    g_key_file_set_boolean(k, "View", "TwoPanels", two_panels);
+    g_key_file_set_boolean(k, "View", "AutoRefresh", auto_refresh);
+    g_key_file_set_boolean(k, "View", "LargeButtons", large_buttons);
+    g_key_file_set_string(k, "View", "LastFolder2", last_folder2.c_str());
+    set_list(k, "History", "Folders", folder_history);
 
     g_mkdir_with_parents(config_dir().c_str(), 0700);
     const std::string file = path_join(config_dir(), "7zipl.conf");
     g_key_file_save_to_file(k, file.c_str(), nullptr);
     g_key_file_free(k);
+}
+
+std::vector<std::string> Settings::work_args() const
+{
+    if (work_mode == 0) return {"-w" + std::string(g_get_tmp_dir())};
+    if (work_mode == 2 && !work_dir.empty() && g_file_test(work_dir.c_str(), G_FILE_TEST_IS_DIR)) return {"-w" + work_dir};
+    return {};  // 7-Zip's default: next to the archive
 }
 
 void Settings::push_history(std::vector<std::string> &list, const std::string &value)

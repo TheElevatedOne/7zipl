@@ -63,11 +63,13 @@ public:
     std::function<void()> on_selection_changed;
     std::function<void(const std::vector<std::string> &)> on_drop_files;  // files dropped on the list
     std::function<void(const Row &)> on_open_file;  // activate on a file that isn't opened inside
+    std::function<void()> on_focus;                  // the list got the keyboard focus (active panel)
 
     // Navigation
     void navigate_fs(const std::string &dir, const std::string &select = {});
+    // `type`: "" by signature, "*" every handler (Open Inside *), "#" parser mode (Open Inside #)
     void open_archive(GtkWindow *parent, const std::string &file, const std::string &inner = {},
-                      std::function<void(bool)> done = nullptr);
+                      std::function<void(bool)> done = nullptr, const std::string &type = {});
     // Navigates to a typed path: a folder, an archive, or a folder inside an archive.
     void navigate_to(GtkWindow *parent, const std::string &path);
     void go_up();
@@ -96,7 +98,22 @@ public:
     void invert_selection();
     void select_mask(const std::string &mask, bool select);
     void select_name(const std::string &name);
+    void select_by_type(bool select);   // items with the focused item's extension
     void focus();
+    bool has_focus() const;
+    GtkWidget *current_view() const { return view_mode_ == 3 ? view_ : grid_; }
+    std::vector<GtkWidget *> views() const { return {view_, grid_}; }
+
+    // View
+    void set_view_mode(int mode);       // 0 large icons, 1 small icons, 2 list, 3 details
+    void sort_by(int column);           // -1 = unsorted (archive / folder order)
+    void set_flat(bool flat);
+    bool flat() const { return flat_; }
+    void set_active(bool active);
+
+    // Extracts archive items to a new temporary folder, then calls `done` with their paths (main thread).
+    void extract_to_temp(GtkWindow *parent, const std::vector<Row> &rows,
+                         std::function<void(const std::vector<std::string> &)> done);
     std::string status_text() const;
 
     void set_show_hidden(bool v);
@@ -111,10 +128,19 @@ private:
     void open_archive_item(GtkWindow *parent, const Row &r, int mode);
     void open_level(GtkWindow *parent, const std::string &file, const std::string &virtual_path,
                     const std::string &inner, bool nested, const std::string &name_in_parent,
-                    std::function<void(bool)> done);
+                    std::function<void(bool)> done, const std::string &type = {});
+    void watch();
+    void scroll_to(guint pos, GtkListScrollFlags flags);                       // auto refresh: monitor the folder or the archive file
+    void collect_flat(std::vector<Row> &rows, const std::string &dir, const std::string &rel, int depth);
 
     GtkWidget *root_ = nullptr;
     GtkWidget *view_ = nullptr;
+    GtkWidget *grid_ = nullptr;
+    GtkWidget *scroller_ = nullptr;
+    GFileMonitor *monitor_ = nullptr;
+    guint monitor_timer_ = 0;
+    int view_mode_ = 3;
+    bool flat_ = false;
     GListStore *store_ = nullptr;
     GtkSortListModel *sorted_ = nullptr;
     GtkMultiSelection *sel_ = nullptr;

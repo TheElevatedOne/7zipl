@@ -168,6 +168,7 @@ namespace {
 struct Ask {
     std::function<void(bool)> cb;
     GtkWidget *win;
+    bool answered = false;
 };
 }  // namespace
 
@@ -189,10 +190,18 @@ void ask_yes_no(GtkWindow *parent, const std::string &title, const std::string &
     gtk_box_append(GTK_BOX(box), row);
     auto b = button_row(box, {"_Yes", "_No"});
     auto *a = new Ask{std::move(cb), w};
-    g_object_set_data_full(G_OBJECT(w), "ask", a, [](gpointer p) { delete static_cast<Ask *>(p); });
+    // No, Escape and closing the window all answer false, so callers waiting for an answer always get one.
+    g_object_set_data_full(G_OBJECT(w), "ask", a, [](gpointer p) {
+        auto *a = static_cast<Ask *>(p);
+        auto cb = std::move(a->cb);
+        const bool answered = a->answered;
+        delete a;
+        if (!answered && cb) cb(false);
+    });
     g_signal_connect(b[0], "clicked", CB([](GtkButton *, gpointer p) {
                          auto *a = static_cast<Ask *>(p);
                          auto cb = a->cb;
+                         a->answered = true;
                          gtk_window_destroy(GTK_WINDOW(a->win));
                          cb(true);
                      }),

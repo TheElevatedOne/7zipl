@@ -18,6 +18,9 @@ The 7-Zip engine in `C/` and `CPP/` is upstream [7-Zip] by Igor Pavlov, unchange
 - **[Requirements](#requirements)**
 - **[Installation](#installation)**
   - [Building](#building)
+- **[Desktop integration](#desktop-integration)**
+  - [Default application for archives and ISOs](#default-application-for-archives-and-isos)
+  - [Context menus of file managers](#context-menus-of-file-managers)
 - **[Quick start](#quick-start)**
   - [Command line](#command-line)
   - [Keyboard shortcuts](#keyboard-shortcuts)
@@ -33,7 +36,7 @@ The 7-Zip engine in `C/` and `CPP/` is upstream [7-Zip] by Igor Pavlov, unchange
 |---|---|---|
 | File manager | `7zipl` (window class `7zipl`) | browsing folders and archives, all archive operations |
 | File-manager actions | `7zipl --extract`, `--extract-here`, `--compress`, … | "Extract here" / "Add to archive" entries in other file managers (what `7zG` does on Windows) |
-| Engine | `sevenzip` (static library from `C/`, `CPP/`) | 7-Zip's codecs and archive handlers, the same sources as `7zz` |
+| Engine | `sevenzip` (object library from `C/`, `CPP/`) | 7-Zip's codecs and archive handlers, the same sources as `7zz` |
 | Desktop entry | `org.sevenzipl.SevenZipL.desktop` | launchers and "Open With" for archive types |
 
 ## Features
@@ -56,6 +59,14 @@ The 7-Zip engine in `C/` and `CPP/` is upstream [7-Zip] by Igor Pavlov, unchange
 - **Change archives in place**: add files (into the open folder), create folders, delete and rename items.
 - **Checksums**: **File → CRC** with every hasher in the engine (CRC32, CRC64, XXH64, MD5, SHA1, SHA256,
   SHA384, SHA512, SHA3-224 to SHA3-512, BLAKE2sp, CKSUM; `*` for all), for files on disk and items inside archives.
+- **The File Manager's tools**: 2 panels (<kbd>F9</kbd>) with Copy/Move between them, Large Icons / Small
+  Icons / List / Details views, Flat View, View (<kbd>F3</kbd>) and Edit (<kbd>F4</kbd>) with any program —
+  a file edited inside an archive is put back into it after you save it — Split and Combine files, Diff, Link
+  (symbolic and hard links), Folders History, Auto Refresh, and the 7-Zip benchmark.
+- **Desktop integration the Linux way**: 7zipl sets itself as the default application for the archive types you
+  tick (`mimeapps.list`, like "Open With" does), installs its desktop entry for the current user if it isn't
+  installed, and adds "Extract Here" / "Add to .7z" entries to the context menus of Dolphin, Nautilus, Nemo,
+  PCManFM-Qt/PCManFM/Caja and Beluga.
 - **Progress like 7-Zip**: elapsed and remaining time, speed, sizes, compression ratio, Pause and Cancel; errors
   and warnings end in a message list instead of disappearing.
 - **Plain GTK 4**: system theme colours (pywal themes work), square corners, no client-side title bar.
@@ -84,6 +95,46 @@ sudo cmake --install build
 
 The first build compiles about 310 7-Zip source files and takes a minute or two.
 
+## Desktop integration
+
+### Default application for archives and ISOs
+
+A system install (`sudo cmake --install build` or the AUR package) puts `org.sevenzipl.SevenZipL.desktop` in
+`/usr/share/applications`. It lists every archive and disk-image type 7zipl opens (7z, zip, rar, tar and its
+compressed forms, ISO, wim, cab, rpm, deb, dmg, squashfs, disk images, …), so 7zipl shows up in **Open With**
+and can be the default.
+
+**Tools → Options → System** is 7-Zip's "Associate 7-Zip with" page:
+
+- It shows each type, its extensions and the program that opens it now.
+- Tick types and press OK, and 7zipl becomes their default for the current user. This is the same
+  `~/.config/mimeapps.list` setting that file managers' "Open With" dialogs change.
+- Untick a type and it goes back to the program it had before.
+- There is no "All users" column: system-wide defaults belong to the distribution.
+
+Running 7zipl without installing it (a build folder, a portable copy)? **Install for the current user** on the same
+page writes `~/.local/share/applications/org.sevenzipl.SevenZipL.desktop`, pointing to the running binary, and its
+icon. Types that already open with another program keep it. **Remove the user entry** takes the entry and its
+associations away again.
+
+### Context menus of file managers
+
+**Tools → Options → 7-Zip** is 7-Zip's "Integrate 7-Zip to shell context menu" page. Tick the file managers and the
+items (Open archive, Extract files..., Extract Here, Extract to folder, Test archive, Add to archive..., Add to .7z,
+Add to .zip, CRC SHA), with or without a "7-Zip" submenu:
+
+| File manager | What 7zipl writes |
+|---|---|
+| Dolphin, Konqueror | KIO service menus `~/.local/share/kio/servicemenus/7zipl-*.desktop` |
+| Files (Nautilus) | scripts in `~/.local/share/nautilus/scripts/` (the "7-Zip" folder is the submenu) |
+| Nemo | `~/.local/share/nemo/actions/7zipl-*.nemo_action` |
+| PCManFM-Qt, PCManFM, Caja | file-manager actions `~/.local/share/file-manager/actions/7zipl-*.desktop` |
+| Beluga | custom actions in `~/.config/beluga/actions.conf` (your own actions stay) |
+
+The entries run the [command-line modes](#command-line). Unticking removes only what 7zipl wrote. Restart an
+open file manager to see the change. Thunar keeps all custom actions in one file and isn't changed: add the
+commands in **Edit → Configure custom actions**.
+
 ## Quick start
 
 ```sh
@@ -108,6 +159,7 @@ These run without the main window, for file-manager context menus:
 | `7zipl --compress-to 7z FILE...` | adds to `<name>.7z` with the saved settings (also `zip`, `tar`, `xz`, …) |
 | `7zipl --test FILE...` | tests the archives |
 | `7zipl --hash SHA256 FILE...` | checksums (`*` for every method) |
+| `7zipl --version` | prints the 7zipl and 7-Zip engine versions |
 | `7zipl --profile DIR` | uses `DIR` for settings instead of `~/.config/7zipl` |
 
 ### Keyboard shortcuts
@@ -123,31 +175,50 @@ These run without the main window, for file-manager context menus:
 | <kbd>Ctrl</kbd>+<kbd>A</kbd>, numpad <kbd>+</kbd> <kbd>-</kbd> <kbd>*</kbd> | select all, select / deselect by mask, invert |
 | <kbd>Ctrl</kbd>+<kbd>R</kbd>, <kbd>Ctrl</kbd>+<kbd>H</kbd>, <kbd>Ctrl</kbd>+<kbd>L</kbd> | refresh, hidden files, address bar |
 | <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>0</kbd>–<kbd>9</kbd> / <kbd>Alt</kbd>+<kbd>0</kbd>–<kbd>9</kbd> | set / go to a favorite folder |
-| <kbd>Ctrl</kbd>+<kbd>F3</kbd>, <kbd>F5</kbd>, <kbd>F6</kbd> | sort by name, date, size |
+| <kbd>F3</kbd> / <kbd>F4</kbd> | View / Edit (from inside an archive too) |
+| <kbd>F9</kbd>, <kbd>Tab</kbd> | 2 panels, switch panel (Copy/Move go to the other panel) |
+| <kbd>Alt</kbd>+<kbd>F12</kbd>, <kbd>\\</kbd> | Folders History, root folder |
+| <kbd>Ctrl</kbd>+<kbd>1</kbd>–<kbd>4</kbd> | Large Icons, Small Icons, List, Details |
+| <kbd>Ctrl</kbd>+<kbd>F3</kbd>–<kbd>F7</kbd> | sort by name, type, date, size; unsorted |
+| <kbd>Alt</kbd>+numpad <kbd>+</kbd> <kbd>-</kbd> | select / deselect by type |
 
 Single-key shortcuts work in the file list only, so typing in the address bar never deletes or renames files.
 
 ## Coming from 7-Zip on Windows
 
-The same: toolbar (Add, Extract, Test, Copy, Move, Delete, Info), menus, the Add to Archive and Extract dialogs
-and their option names, the progress window, "Confirm File Replace", favorites, column set per archive format,
-folders first.
+The same: toolbar (Add, Extract, Test, Copy, Move, Delete, Info), the menus, the Add to Archive and Extract
+dialogs and their option names, the progress window, "Confirm File Replace", favorites, the column set per archive
+format, folders first, 2 panels, the benchmark.
 
-Different:
+Windows features that manage the system have a Linux equivalent:
 
-- **Delete** on disk moves to the Trash (freedesktop.org); <kbd>Shift</kbd>+<kbd>Delete</kbd> deletes.
-- Attributes are Unix permissions (`-rw-r--r--`) on disk.
-- Not there (yet): two panels (<kbd>F9</kbd>), split/combine files, the benchmark, SFX archives, editing a file
-  inside an archive and saving it back, language files, shell integration on Windows-only APIs.
+| 7-Zip on Windows | 7zipl |
+|---|---|
+| Options → System: associate with 7-Zip (registry) | default application per MIME type in `mimeapps.list`, current user ([details](#default-application-for-archives-and-isos)) |
+| Options → System: "All users" | the distribution's defaults; not changed by an app |
+| Options → 7-Zip: Explorer context menu (shell extension DLL) | context-menu files for each file manager ([details](#context-menus-of-file-managers)) |
+| Options → 7-Zip: Eliminate duplication of root folder | the same, for "Extract to folder" |
+| Options → Folders: working folder | the same (`-w`); default "Current", because `/tmp` is usually in RAM |
+| Options → Editor: View / Editor / Diff programs | the same; empty means the system's default application |
+| Options → Settings: memory limit for unpacking | the same (only RAR 7 archives with huge dictionaries ask) |
+| Delete to the Recycle Bin | the Trash (freedesktop.org); <kbd>Shift</kbd>+<kbd>Delete</kbd> deletes |
+| Attributes (`RHSA`) | Unix permissions (`-rw-r--r--`) |
+| File → Link: hard link, symbolic link, junction | hard link, symbolic link, relative symbolic link |
+| Tools → Delete Temporary Files | the same, for `$XDG_RUNTIME_DIR/7zipl` |
+
+Not there, because Linux has no such thing: alternate streams (NTFS ADS), the Zone.Identifier option, "show system
+menu", large memory pages, full-row select and alternative selection modes. Not there yet: SFX archives, Benchmark 2,
+language files.
 
 ## Settings
 
-`~/.config/7zipl/7zipl.conf` (a key file), written on exit and when a dialog closes with OK; **Tools → Options**
-shows the view settings. It holds the view options, window size, last folder, favorites, the Add to Archive and
-Extract defaults, and the folder history. `--profile DIR` or `SZL_PROFILE=DIR` uses another folder.
+**Tools → Options** has 7-Zip's pages: System, 7-Zip, Folders, Editor and Settings. They're stored in
+`~/.config/7zipl/7zipl.conf` (a key file), together with the view options, window size, last folders, favorites,
+the Add to Archive and Extract defaults, and the folder history. `--profile DIR` or `SZL_PROFILE=DIR` uses another
+folder.
 
-Temporary copies (opening a file inside an archive, nested archives) go to `$XDG_RUNTIME_DIR/7zipl/` and are
-removed when 7zipl exits.
+Temporary copies (View/Edit inside an archive, nested archives) go to `$XDG_RUNTIME_DIR/7zipl/` and are removed when
+7zipl exits. **Tools → Delete Temporary Files** cleans up after a 7zipl that crashed.
 
 ## Testing
 
@@ -155,9 +226,17 @@ removed when 7zipl exits.
 ctest --test-dir build --output-on-failure
 ```
 
-runs `7zipl --selftest`: creating, listing, extracting (with a folder prefix removed), testing, renaming,
-deleting, hashing, encrypted headers, zip/tar/gz, and the main window browsing into archives and adding a file
-into an archive folder. It needs a display and exits with 77 (skipped) without one. To run it without a screen:
+runs `7zipl --selftest` (125 checks):
+
+- The engine: create, list, extract (with a folder prefix removed), test, rename, delete, hash, encrypted headers,
+  zip/tar/gz, Open Inside #, the benchmark, and the working folder.
+- Split and Combine.
+- Desktop integration: the user desktop entry, default applications, and every context-menu writer.
+- The main window: browsing into archives, adding a file into an archive folder, Flat View, view modes, 2 panels,
+  copying out of an archive, and Edit putting a changed file back.
+
+It runs with its own temporary XDG folders, so your settings, `mimeapps.list` and context menus are never touched.
+It needs a display and exits with 77 (skipped) without one. To run it without a screen:
 
 ```sh
 gtk4-broadwayd :5 &

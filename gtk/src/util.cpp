@@ -7,6 +7,8 @@
 #include <ctime>
 #include <mutex>
 
+#include <unistd.h>
+
 namespace szl {
 
 std::string format_number(uint64_t v)
@@ -105,13 +107,18 @@ std::mutex g_temp_mutex;
 std::vector<std::string> g_temp_dirs;
 }  // namespace
 
-std::string make_temp_dir(const std::string &tag)
+std::string temp_root()
 {
     const char *base = g_get_user_runtime_dir();
     if (!base || !g_file_test(base, G_FILE_TEST_IS_DIR)) base = g_get_tmp_dir();
-    std::string root = path_join(base, "7zipl");
+    return path_join(base, "7zipl");
+}
+
+std::string make_temp_dir(const std::string &tag)
+{
+    std::string root = temp_root();
     g_mkdir_with_parents(root.c_str(), 0700);
-    std::string tmpl = path_join(root, tag + "-XXXXXX");
+    std::string tmpl = path_join(root, tag + "-" + std::to_string((long)getpid()) + "-XXXXXX");
     std::vector<char> buf(tmpl.begin(), tmpl.end());
     buf.push_back('\0');
     if (!g_mkdtemp_full(buf.data(), 0700)) return {};

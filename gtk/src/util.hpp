@@ -23,7 +23,9 @@ std::string path_join(const std::string &a, const std::string &b);
 std::string strip_archive_ext(const std::string &name);
 std::string home_dir();
 // A fresh private directory below $XDG_RUNTIME_DIR (or /tmp) for temporary extraction; removed on exit.
+// A new private folder in $XDG_RUNTIME_DIR/7zipl ("<tag>-<pid>-XXXXXX"), removed by cleanup_temp_dirs().
 std::string make_temp_dir(const std::string &tag);
+std::string temp_root();
 void remove_tree(const std::string &path);
 void cleanup_temp_dirs();
 

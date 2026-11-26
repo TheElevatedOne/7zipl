@@ -28,6 +28,17 @@ static const char *kCss = R"css(
 .szl-list.inactive > listview > row:selected cell {
   background-color: mix(@szl_view_bg, @szl_accent_bg, 0.45);
 }
+gridview.szl-list > child { padding: 4px; }
+gridview.szl-list > child:selected {
+  background-color: @szl_accent_bg;
+  color: @szl_accent_fg;
+}
+gridview.szl-list.inactive > child:selected {
+  background-color: mix(@szl_view_bg, @szl_accent_bg, 0.45);
+}
+/* 2 Panels: the active panel's address bar is marked with the accent colour */
+.szl-panel { border-right: 1px solid mix(@szl_window_bg, @szl_window_fg, 0.12); }
+.szl-panel.active-panel > .szl-address { box-shadow: inset 0 -2px @szl_accent_bg; }
 
 .szl-toolbar {
   padding: 2px 4px;

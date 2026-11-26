@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 #include "app.hpp"
 
+#include <cstdio>
+
 #include "compressdialog.hpp"
 #include "dialogs.hpp"
 #include "engine.hpp"
@@ -30,7 +32,10 @@ struct AppState {
 void save_screenshot(GtkWidget *w, const std::string &file)
 {
     const int width = gtk_widget_get_width(w), height = gtk_widget_get_height(w);
-    if (width <= 0 || height <= 0) return;
+    if (width <= 0 || height <= 0) {
+        std::fprintf(stderr, "7zipl: the window isn't shown yet, no screenshot\n");
+        return;
+    }
     GdkPaintable *p = gtk_widget_paintable_new(w);
     GtkSnapshot *s = gtk_snapshot_new();
     gdk_paintable_snapshot(p, s, width, height);
@@ -39,9 +44,11 @@ void save_screenshot(GtkWidget *w, const std::string &file)
         GskRenderer *r = gtk_native_get_renderer(GTK_NATIVE(w));
         graphene_rect_t rect = GRAPHENE_RECT_INIT(0, 0, (float)width, (float)height);
         GdkTexture *t = gsk_renderer_render_texture(r, node, &rect);
-        gdk_texture_save_to_png(t, file.c_str());
-        g_object_unref(t);
+        if (!t || !gdk_texture_save_to_png(t, file.c_str())) std::fprintf(stderr, "7zipl: cannot save %s\n", file.c_str());
+        if (t) g_object_unref(t);
         gsk_render_node_unref(node);
+    } else {
+        std::fprintf(stderr, "7zipl: nothing to render for the screenshot\n");
     }
     g_object_unref(p);
 }
@@ -90,9 +97,35 @@ void activate(GtkApplication *app, AppState *st)
                 GtkApplication *app;
             };
             auto *s = new S{GTK_WIDGET(w->window()), o.screenshot, app};
-            g_timeout_add(1500, [](gpointer p) -> gboolean {
+            // SZL_SCREENSHOT_ACTION=win.options (also "win.view-mode(0)"): run a window action first and capture the
+            // dialog it opens, if any. For README screenshots and checks without a screen.
+            if (const char *act = g_getenv("SZL_SCREENSHOT_ACTION")) {
+                g_timeout_add(700, [](gpointer p) -> gboolean {
+                    auto *s = static_cast<S *>(p);
+                    char *name = nullptr;
+                    GVariant *target = nullptr;
+                    if (g_action_parse_detailed_name(g_getenv("SZL_SCREENSHOT_ACTION"), &name, &target, nullptr)) {
+                        const char *n = g_str_has_prefix(name, "win.") ? name + 4 : name;
+                        g_action_group_activate_action(G_ACTION_GROUP(s->w), n, target);
+                    }
+                    g_free(name);
+                    if (target) g_variant_unref(target);
+                    return G_SOURCE_REMOVE;
+                }, s);
+                (void)act;
+            }
+            const char *delay = g_getenv("SZL_SCREENSHOT_DELAY");  // ms, default 1500
+            g_timeout_add(delay ? (guint)atoi(delay) : 1500u, [](gpointer p) -> gboolean {
                 auto *s = static_cast<S *>(p);
-                save_screenshot(s->w, s->file);
+                GtkWidget *target = s->w;
+                GListModel *tops = gtk_window_get_toplevels();
+                for (guint i = 0; i < g_list_model_get_n_items(tops); i++) {
+                    GtkWidget *t = GTK_WIDGET(g_list_model_get_item(tops, i));
+                    if (t != s->w && gtk_widget_get_visible(t) && gtk_window_get_transient_for(GTK_WINDOW(t)) == GTK_WINDOW(s->w))
+                        target = t;
+                    g_object_unref(t);
+                }
+                save_screenshot(target, s->file);
                 g_application_quit(G_APPLICATION(s->app));
                 delete s;
                 return G_SOURCE_REMOVE;
@@ -112,7 +145,7 @@ void activate(GtkApplication *app, AppState *st)
         c.out_dir = common_dir(files);
         if (o.mode == Mode::ExtractToFolder) {
             c.out_dir = path_join(c.out_dir, files.size() == 1 ? strip_archive_ext(path_basename(files[0])) : "*");
-            c.elim_dup = true;
+            c.elim_dup = settings().extract.elim_dup;  // Options > 7-Zip
         } else {
             c.elim_dup = false;
         }

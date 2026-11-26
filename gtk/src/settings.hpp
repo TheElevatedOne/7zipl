@@ -54,6 +54,29 @@ struct Settings {
     ExtractDefaults extract;
     std::string hash_method = "CRC32";
 
+    // Options > Folders: where archives are written while they are updated (7-Zip's -w switch)
+    int work_mode = 1;            // 0 system temp folder, 1 current (the archive's folder), 2 specified
+    std::string work_dir;
+    // Options > Editor: programs for View (F3), Edit (F4) and Diff; empty = the system default
+    std::string viewer, editor, diff;
+    // Options > Settings
+    bool real_icons = true;       // icons by file type (else generic file/folder icons)
+    bool mem_limit = false;       // limit the memory archives may use to unpack
+    int mem_limit_gb = 4;
+    // Options > 7-Zip (context menus of file managers)
+    unsigned ctx_items = 0x1FF;
+    bool ctx_cascaded = true;
+    // View
+    int view_mode = 3;            // 0 large icons, 1 small icons, 2 list, 3 details
+    bool two_panels = false;
+    bool auto_refresh = true;
+    bool large_buttons = true;
+    std::string last_folder2;
+    std::vector<std::string> folder_history;
+
+    // 7-Zip's -w switch for commands that write an archive.
+    std::vector<std::string> work_args() const;
+
     void load();
     void save() const;
     void push_history(std::vector<std::string> &list, const std::string &value);

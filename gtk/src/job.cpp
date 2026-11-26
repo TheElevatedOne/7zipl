@@ -64,6 +64,7 @@ public:
     Overwrite ask_overwrite(const std::string &existing, uint64_t es, int64_t et, const std::string &incoming,
                             uint64_t is, int64_t it) override;
     void message(Level, const std::string &) override {}
+    bool ask_memory(uint64_t required, uint64_t limit, const std::string &archive) override;
 
 private:
     void build_window();
@@ -242,6 +243,21 @@ void Job::cancel()
     cv_.notify_all();
     if (b_cancel_) gtk_widget_set_sensitive(b_cancel_, FALSE);
     if (b_pause_) gtk_widget_set_sensitive(b_pause_, FALSE);
+}
+
+bool Job::ask_memory(uint64_t required, uint64_t limit, const std::string &archive)
+{
+    std::promise<bool> p;
+    auto f = p.get_future();
+    run_on_main([this, &p, required, limit, archive] {
+        present();
+        ask_yes_no(win_ ? GTK_WINDOW(win_) : parent_, "Memory usage",
+                   "The archive requires a large amount of memory to unpack:\n" + archive + "\n\nRequired: " +
+                       format_number(required >> 20) + " MB\nAllowed (Tools > Options > Settings): " +
+                       format_number(limit >> 20) + " MB\n\nAllow it for this operation?",
+                   [&p](bool yes) { p.set_value(yes); });
+    });
+    return f.get();
 }
 
 bool Job::ask_password(const std::string &archive, std::string &password)

@@ -45,7 +45,7 @@ std::vector<GtkWidget *> button_row(GtkWidget *box, const std::vector<std::strin
 
 // Simple messages.
 void show_message(GtkWindow *parent, const std::string &title, const std::string &text, bool error = false);
-// Asks a yes/no question; `cb(true)` on Yes.
+// Asks a yes/no question; `cb(true)` on Yes, `cb(false)` on No or when the window is closed.
 void ask_yes_no(GtkWindow *parent, const std::string &title, const std::string &text, std::function<void(bool)> cb);
 // Asks for a line of text; `cb(text)` on OK only.
 void ask_text(GtkWindow *parent, const std::string &title, const std::string &prompt, const std::string &initial,

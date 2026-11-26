@@ -24,6 +24,7 @@
 
 #include "CPP/7zip/Common/RegisterCodec.h"
 #include "CPP/7zip/UI/Common/ArchiveCommandLine.h"
+#include "CPP/7zip/UI/Common/Bench.h"
 #include "CPP/7zip/UI/Common/ArchiveExtractCallback.h"
 #include "CPP/7zip/UI/Common/ArchiveOpenCallback.h"
 #include "CPP/7zip/UI/Common/Extract.h"
@@ -37,6 +38,7 @@
 #include "engine.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 
 extern unsigned g_NumHashers;
@@ -279,11 +281,23 @@ Z7_COM7F_IMF(ExtractCallback::CryptoGetTextPassword(BSTR *password))
     return ctx.get_password(password);
 }
 
+std::atomic<uint64_t> g_memory_limit{0};
+
 Z7_COM7F_IMF(ExtractCallback::RequestMemoryUse(UInt32 flags, UInt32, UInt32, const wchar_t *path, UInt64 requiredSize,
                                                UInt64 *allowedSize, UInt32 *answerFlags))
 {
-    // Allow what the archive needs, like 7-Zip's console does with -smemx. The size is reported.
+    // Like 7-Zip FM: allow up to the limit from Options > Settings, and ask above it.
     if ((flags & NRequestMemoryUseFlags::k_IsReport) == 0) {
+        const uint64_t limit = g_memory_limit;
+        if (limit && requiredSize > limit) {
+            std::lock_guard<std::mutex> lock(ctx.mt);
+            if (!ctx.ui.ask_memory(requiredSize, limit, path ? u2s(path) : ctx.archive)) {
+                *answerFlags = NRequestMemoryAnswerFlags::k_SkipArc;
+                ctx.error("The archive needs " + std::to_string(requiredSize >> 20) + " MB of memory to unpack; the limit is " +
+                          std::to_string(limit >> 20) + " MB (Tools > Options > Settings)");
+                return ctx.check();
+            }
+        }
         *allowedSize = requiredSize;
         *answerFlags = NRequestMemoryAnswerFlags::k_Allow;
         return ctx.check();
@@ -624,6 +638,8 @@ std::string prop_name(PROPID id, const wchar_t *name)
 
 // ---------- public API ----------
 
+void set_memory_limit(uint64_t bytes) { g_memory_limit = bytes; }
+
 void init(const char *argv0)
 {
     if (g_codecs) return;
@@ -685,7 +701,7 @@ bool looks_like_archive(const std::string &path)
     return false;
 }
 
-ArchiveListing open_archive(const std::string &path, Ui &ui, const std::string &password)
+ArchiveListing open_archive(const std::string &path, Ui &ui, const std::string &password, const std::string &type)
 {
     ArchiveListing out;
     out.path = path;
@@ -698,6 +714,7 @@ ArchiveListing open_archive(const std::string &path, Ui &ui, const std::string &
     }
     try {
         CObjectVector<COpenType> types;
+        if (!type.empty() && !ParseOpenTypes(*g_codecs, s2u(type), types)) types.Clear();
         CIntVector excluded;
         CArchiveLink link;
         COpenOptions op;
@@ -1078,6 +1095,47 @@ Result extract_items(const ExtractRequest &req, Ui &ui)
         ctx.error("Unknown error");
     }
     finish(r, hr);
+    return r;
+}
+
+namespace {
+class BenchPrint final : public IBenchPrintCallback {
+public:
+    BenchPrint(Ui &u, const std::function<void(const std::string &)> &p) : ui(u), print(p) {}
+    void Print(const char *s) override { print(s); }
+    void NewLine() override { print("\n"); }
+    HRESULT CheckBreak() override { return ui.cancelled() ? E_ABORT : S_OK; }
+    Ui &ui;
+    const std::function<void(const std::string &)> &print;
+};
+}  // namespace
+
+Result benchmark(unsigned threads, unsigned dict_log, unsigned passes, Ui &ui,
+                 const std::function<void(const std::string &)> &print)
+{
+    Result r;
+    try {
+        CObjectVector<CProperty> props;
+        if (threads) {
+            CProperty p;
+            p.Name = L"mt";
+            p.Value.Add_UInt32(threads);
+            props.Add(p);
+        }
+        if (dict_log) {
+            CProperty p;
+            p.Name = L"d";
+            p.Value.Add_UInt32(dict_log);
+            props.Add(p);
+        }
+        BenchPrint cb(ui, print);
+        const HRESULT hr = Bench(EXTERNAL_CODECS_LOC_VARS & cb, nullptr, props, passes ? passes : 1, true);
+        finish(r, hr);
+    } catch (...) {
+        r.errors++;
+        r.messages.push_back("Benchmark error");
+        finish(r, S_OK);
+    }
     return r;
 }
 
