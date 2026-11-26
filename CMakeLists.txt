@@ -20,7 +20,9 @@ set(SZL_APP_ID "org.sevenzipl.SevenZipL")
 
 # ---- 7-Zip engine: the 7zz bundle (CPP/7zip/Bundles/Alone2) without its console front-end ----
 include(cmake/sevenzip-sources.cmake)
-add_library(sevenzip STATIC ${SEVENZIP_BACKEND_SOURCES})
+# An OBJECT library: the codecs and archive handlers register themselves from static constructors that
+# nothing references, so a static archive would let the linker drop them.
+add_library(sevenzip OBJECT ${SEVENZIP_BACKEND_SOURCES})
 target_compile_definitions(sevenzip PUBLIC _REENTRANT _FILE_OFFSET_BITS=64 _LARGEFILE_SOURCE
   $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
 # Upstream builds with -Wall -Wextra -Werror; warnings from newer compilers must not break the build here.
@@ -33,7 +35,7 @@ target_link_libraries(sevenzip PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
 set(SZL_WARN -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
 
 # The glue between the GUI and the engine; the only code that includes 7-Zip's headers.
-add_library(szlengine STATIC gtk/src/engine.cpp)
+add_library(szlengine OBJECT gtk/src/engine.cpp)
 target_compile_options(szlengine PRIVATE -Wno-unused-parameter)
 target_link_libraries(szlengine PUBLIC sevenzip)
 
@@ -58,7 +60,7 @@ target_compile_definitions(7zipl PRIVATE
   SZL_APP_ID="${SZL_APP_ID}"
   GDK_DISABLE_DEPRECATION_WARNINGS)
 target_compile_options(7zipl PRIVATE ${SZL_WARN})
-target_link_libraries(7zipl PRIVATE szlengine PkgConfig::GTK4)
+target_link_libraries(7zipl PRIVATE sevenzip szlengine PkgConfig::GTK4)
 
 install(TARGETS 7zipl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
