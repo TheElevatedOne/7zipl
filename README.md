@@ -1,6 +1,6 @@
 # 7zipl
 
-![Static Badge](https://img.shields.io/badge/CLAUDE-VIBECODED?style=for-the-badge&logo=claude&label=VIBECODED&labelColor=%23333333&color=%23de7356)
+![Static Badge](https://img.shields.io/badge/CLAUDE-VIBECODED?style=for-the-badge&logo=claude&label=VIBECODED&labelColor=%23333333&color=%23de7356) [![AUR Version](https://img.shields.io/aur/version/7zipl-bin?style=for-the-badge&logo=archlinux)](https://aur.archlinux.org/packages/7zipl-bin) [![AUR Version](https://img.shields.io/aur/version/7zipl-git?style=for-the-badge&logo=archlinux)](https://aur.archlinux.org/packages/7zipl-git)
 
 <p align="center"><img src="data/icons/org.sevenzipl.SevenZipL.svg" alt="7zipl icon: a blue box with a zipper between a 7 and a z" width="128"></p>
 
@@ -18,6 +18,8 @@ contains no 7-Zip code.
 - **[Features](#features)**
 - **[Requirements](#requirements)**
 - **[Installation](#installation)**
+  - [Arch Linux (AUR)](#arch-linux-aur)
+  - [Release tarball](#release-tarball)
   - [Building](#building)
 - **[Desktop integration](#desktop-integration)**
   - [Default application for archives and ISOs](#default-application-for-archives-and-isos)
@@ -92,8 +94,29 @@ contains no 7-Zip code.
 
 ## Installation
 
-AUR packages are prepared in [`aur/`](aur) (`7zipl-git` builds from this repository, `7zipl-bin` installs the
-release tarball).
+### Arch Linux (AUR)
+
+| Package | Description |
+|---|---|
+| [`7zipl-bin`](https://aur.archlinux.org/packages/7zipl-bin) | Prebuilt x86_64 binary from the GitHub release |
+| [`7zipl-git`](https://aur.archlinux.org/packages/7zipl-git) | Built from the latest commit |
+
+```sh
+paru -S 7zipl-bin   # or 7zipl-git
+```
+
+Both pull in the `7zip` package for `7z.so`.
+
+### Release tarball
+
+Each [release](https://github.com/TheElevatedOne/7zipl/releases) has `7zipl-<version>-linux-x86_64.tar.gz`, built
+on Arch Linux. It contains `bin/7zipl` and `share/` (desktop file, metainfo, icon). It needs GTK 4.14+ and the
+`7zip` package's `/usr/lib/7zip/7z.so` (the binary looks for it there).
+
+```sh
+tar -xzf 7zipl-<version>-linux-x86_64.tar.gz
+sudo cp -r 7zipl-<version>-linux-x86_64/{bin,share} /usr/local/
+```
 
 ### Building
 

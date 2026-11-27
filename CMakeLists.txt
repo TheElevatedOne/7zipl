@@ -76,6 +76,8 @@ target_compile_options(7zipl PRIVATE ${SZL_WARN})
 pkg_check_modules(GIO_UNIX REQUIRED IMPORTED_TARGET gio-unix-2.0)
 target_link_libraries(7zipl PRIVATE sevenzip Threads::Threads ${CMAKE_DL_LIBS} PkgConfig::GTK4 PkgConfig::GIO_UNIX)
 set_target_properties(7zipl PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "${SZL_7Z_DIR}")
+# Only record the libraries 7zipl calls (pkg-config lists all of GTK's).
+target_link_options(7zipl PRIVATE -Wl,--as-needed)
 
 install(TARGETS 7zipl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
