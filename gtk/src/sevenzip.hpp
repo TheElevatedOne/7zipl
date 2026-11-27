@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
-// 7zipl: the binary interface of 7-Zip's plugin library 7z.so (7-Zip 23 and newer on Linux), declared from
-// 7-Zip's public interface headers (IArchive.h, IStream.h, ICoder.h, PropID.h). Only the declarations
-// 7zipl uses are here; the library itself comes from the distribution's 7zip package.
+// 7zipl: the header for 7-Zip's library 7z.so (7-Zip 23 and newer on Linux), which the distributions ship
+// without one. Written from 7-Zip's interface headers (IArchive.h, IStream.h, IPassword.h, IProgress.h,
+// ICoder.h, PropID.h, MyWindows.h) with the same layout, so it matches the library's ABI. Only what 7zipl
+// uses is declared; the library itself comes from the distribution's 7zip package.
 #pragma once
 
 #include <cstddef>
@@ -183,22 +184,29 @@ SZ_IFACE(IHashers, IUnknown, 4, 0xC1)
 
 #undef SZ_IFACE
 
-// Exported functions of 7z.so.
-extern "C" {
-using Func_CreateObject = HRESULT (*)(const GUID *clsid, const GUID *iid, void **out);
-using Func_GetNumberOfFormats = HRESULT (*)(uint32_t *num);
-using Func_GetHandlerProperty2 = HRESULT (*)(uint32_t index, PROPID id, PROPVARIANT *value);
 using Func_IsArc = uint32_t (*)(const Byte *p, size_t size);
-using Func_GetIsArc = HRESULT (*)(uint32_t index, Func_IsArc *is_arc);
-using Func_GetNumberOfMethods = HRESULT (*)(uint32_t *num);
-using Func_GetMethodProperty = HRESULT (*)(uint32_t index, PROPID id, PROPVARIANT *value);
-using Func_CreateCoder = HRESULT (*)(uint32_t index, const GUID *iid, void **out);
-using Func_GetHashers = HRESULT (*)(IHashers **hashers);
-using Func_GetModuleProp = HRESULT (*)(PROPID id, PROPVARIANT *value);
-using Func_SysAllocStringLen = BSTR (*)(const wchar_t *s, uint32_t len);
-using Func_SysFreeString = void (*)(BSTR s);
-using Func_SysStringByteLen = uint32_t (*)(BSTR s);
+
+}  // namespace sz
+
+// Functions exported by 7z.so (C linkage, in 7-Zip's DllExports2.cpp, ArchiveExports.cpp, CodecExports.cpp
+// and MyWindows.cpp). 7zipl links against the library, so these are called directly.
+extern "C" {
+sz::HRESULT CreateObject(const sz::GUID *clsid, const sz::GUID *iid, void **out);
+sz::HRESULT GetNumberOfFormats(uint32_t *num);
+sz::HRESULT GetHandlerProperty2(uint32_t index, sz::PROPID id, sz::PROPVARIANT *value);
+sz::HRESULT GetIsArc(uint32_t index, sz::Func_IsArc *is_arc);
+sz::HRESULT GetNumberOfMethods(uint32_t *num);
+sz::HRESULT GetMethodProperty(uint32_t index, sz::PROPID id, sz::PROPVARIANT *value);
+sz::HRESULT CreateEncoder(uint32_t index, const sz::GUID *iid, void **out);
+sz::HRESULT CreateDecoder(uint32_t index, const sz::GUID *iid, void **out);
+sz::HRESULT GetHashers(sz::IHashers **hashers);
+sz::HRESULT GetModuleProp(sz::PROPID id, sz::PROPVARIANT *value);
+sz::BSTR SysAllocStringLen(const wchar_t *s, uint32_t len);
+void SysFreeString(sz::BSTR s);
+uint32_t SysStringByteLen(sz::BSTR s);
 }
+
+namespace sz {
 
 namespace handler_prop { enum { kName = 0, kClassID, kExtension, kAddExtension, kUpdate, kKeepName, kSignature,
                                 kMultiSignature, kSignatureOffset, kAltStreams, kNtSecure, kFlags, kTimeFlags }; }

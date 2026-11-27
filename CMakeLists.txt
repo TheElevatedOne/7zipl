@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(7zipl VERSION 0.1.0 LANGUAGES C CXX)
 
-# 7zipl: a native GTK 4 front-end for 7-Zip on Linux. It loads 7-Zip's library (7z.so from the
-# distribution's 7zip package) at run time; the GUI lives in gtk/.
+# 7zipl: a native GTK 4 front-end for 7-Zip on Linux. It links 7-Zip's library (7z.so from the
+# distribution's 7zip package), declared in gtk/src/sevenzip.hpp; the GUI lives in gtk/.
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,6 +15,21 @@ include(GNUInstallDirs)
 find_package(PkgConfig REQUIRED)
 find_package(Threads REQUIRED)
 pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4>=4.14)
+
+# 7z.so has no soname and lives outside the library path, so link it as "7z.so" and give the binary a RUNPATH
+# to its folder. Arch, Debian and Ubuntu: /usr/lib/7zip; Fedora: /usr/libexec/7zip.
+find_library(SZL_7Z_LIBRARY NAMES 7z.so
+  PATHS /usr/lib/7zip /usr/libexec/7zip /usr/lib64/7zip /usr/local/lib/7zip NO_DEFAULT_PATH)
+if(NOT SZL_7Z_LIBRARY)
+  message(FATAL_ERROR "7-Zip's library 7z.so was not found: install the 7zip package (7-Zip 23 or newer), "
+                      "or pass -DSZL_7Z_LIBRARY=/path/to/7z.so")
+endif()
+get_filename_component(SZL_7Z_DIR "${SZL_7Z_LIBRARY}" DIRECTORY)
+get_filename_component(SZL_7Z_NAME "${SZL_7Z_LIBRARY}" NAME)
+add_library(sevenzip INTERFACE)
+target_link_directories(sevenzip INTERFACE "${SZL_7Z_DIR}")
+target_link_libraries(sevenzip INTERFACE "-l:${SZL_7Z_NAME}")
+message(STATUS "7-Zip library: ${SZL_7Z_LIBRARY}")
 
 set(SZL_APP_ID "org.sevenzipl.SevenZipL")
 
@@ -59,7 +74,8 @@ target_compile_definitions(7zipl PRIVATE
   GDK_DISABLE_DEPRECATION_WARNINGS)
 target_compile_options(7zipl PRIVATE ${SZL_WARN})
 pkg_check_modules(GIO_UNIX REQUIRED IMPORTED_TARGET gio-unix-2.0)
-target_link_libraries(7zipl PRIVATE Threads::Threads ${CMAKE_DL_LIBS} PkgConfig::GTK4 PkgConfig::GIO_UNIX)
+target_link_libraries(7zipl PRIVATE sevenzip Threads::Threads ${CMAKE_DL_LIBS} PkgConfig::GTK4 PkgConfig::GIO_UNIX)
+set_target_properties(7zipl PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "${SZL_7Z_DIR}")
 
 install(TARGETS 7zipl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 

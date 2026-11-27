@@ -37,13 +37,14 @@ contains no 7-Zip code.
 |---|---|---|
 | File manager | `7zipl` (window class `7zipl`) | browsing folders and archives, all archive operations |
 | File-manager actions | `7zipl --extract`, `--extract-here`, `--compress`, … | "Extract here" / "Add to archive" entries in other file managers (what `7zG` does on Windows) |
-| Engine | `7z.so` from the `7zip` package (not part of 7zipl) | every archive operation, loaded into 7zipl |
+| Engine | `7z.so` from the `7zip` package (not part of 7zipl) | every archive operation; 7zipl links against it |
 | Desktop entry | `org.sevenzipl.SevenZipL.desktop` | launchers and "Open With" for archive types |
 
 ## Features
 
-- **Uses the system 7-Zip library**: 7zipl loads `7z.so` from the `7zip` package (`SZL_7Z_SO` picks another one)
-  and calls its archive handlers, codecs and hashers directly, the way 7-Zip's own programs do. Formats, hash
+- **Uses the system 7-Zip library**: 7zipl links against `7z.so` from the `7zip` package and calls its archive
+  handlers, codecs and hashers directly, the way 7-Zip's own programs do. The library ships without a header, so
+  7zipl has its own (`gtk/src/sevenzip.hpp`), written from 7-Zip's interface headers. Formats, hash
   methods and compression settings come from the library, and progress, Pause and Cancel work per byte.
   Passwords stay inside the process. Links that would point outside the output folder are refused when
   extracting, as in 7-Zip.
@@ -85,9 +86,9 @@ contains no 7-Zip code.
   | Debian 13, Ubuntu 24.04 and newer | `7zip` | `/usr/lib/7zip/7z.so` |
   | Fedora | `7zip` | `/usr/libexec/7zip/7z.so` |
 
-  Debian 12's `7zip` package has no `7z.so`, and the old `p7zip` (16.02) is not supported. Without the
-  library, 7zipl starts and tells you to install it.
-- To build: a C++17 compiler (GCC or Clang), CMake 3.16+, Ninja or Make, pkg-config
+  Debian 12's `7zip` package has no `7z.so`, and the old `p7zip` (16.02) is not supported.
+- To build: a C++17 compiler (GCC or Clang), CMake 3.16+, Ninja or Make, pkg-config, and the `7zip` package
+  (CMake finds `7z.so` in the folders above; `-DSZL_7Z_LIBRARY=/path/to/7z.so` picks another one)
 
 ## Installation
 

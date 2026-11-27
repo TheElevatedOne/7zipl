@@ -679,7 +679,7 @@ void update(const Options &o, Ui &ui, Result &r)
     if (have_old) {
         out = old.levels[0].arc.query<IOutArchive>(IID_IOutArchive);
     } else {
-        g_lib.create_object(&F.clsid, &IID_IOutArchive, out.pv());
+        CreateObject(&F.clsid, &IID_IOutArchive, out.pv());
     }
     if (!out) {
         add_error(r, ui, "Cannot create " + F.name + " archives");
@@ -957,7 +957,7 @@ std::string hex_digest(const Byte *d, size_t n)
 void hash_cmd(const Options &o, Ui &ui, Result &r)
 {
     Com<IHashers> hs;
-    if (!g_lib.get_hashers || g_lib.get_hashers(hs.put()) != S_OK || !hs) {
+    if (GetHashers(hs.put()) != S_OK || !hs) {
         add_error(r, ui, "The 7-Zip library has no hash functions");
         return;
     }
@@ -1252,19 +1252,19 @@ Result benchmark(unsigned threads, unsigned dict_log, unsigned passes, Ui &ui,
 {
     Result r;
     if (!available()) {
-        add_error(r, ui, "7-Zip's library (7z.so) was not found");
+        add_error(r, ui, "7-Zip's library (7z.so) is not usable: " + program());
         finish(r);
         return r;
     }
     int lzma = -1;
     uint32_t nm = 0;
-    if (g_lib.num_methods) g_lib.num_methods(&nm);
+    GetNumberOfMethods(&nm);
     for (uint32_t i = 0; i < nm && lzma < 0; i++) {
         Prop p;
         std::string s;
-        if (g_lib.method_prop(i, method_prop::kName, &p) == S_OK && p.get_str(s) && s == "LZMA") lzma = (int)i;
+        if (GetMethodProperty(i, method_prop::kName, &p) == S_OK && p.get_str(s) && s == "LZMA") lzma = (int)i;
     }
-    if (lzma < 0 || !g_lib.create_encoder || !g_lib.create_decoder) {
+    if (lzma < 0) {
         add_error(r, ui, "The 7-Zip library has no LZMA codec");
         finish(r);
         return r;
@@ -1305,7 +1305,7 @@ Result benchmark(unsigned threads, unsigned dict_log, unsigned passes, Ui &ui,
             const double c0 = cpu_seconds();
             auto encode = [&](unsigned j) {
                 Com<ICompressCoder> enc;
-                if (g_lib.create_encoder((uint32_t)lzma, &IID_ICompressCoder, enc.pv()) != S_OK || !enc) {
+                if (CreateEncoder((uint32_t)lzma, &IID_ICompressCoder, enc.pv()) != S_OK || !enc) {
                     failed = true;
                     return;
                 }
@@ -1355,7 +1355,7 @@ Result benchmark(unsigned threads, unsigned dict_log, unsigned passes, Ui &ui,
             const double c1 = cpu_seconds();
             auto decode = [&](unsigned j) {
                 Com<ICompressCoder> dec;
-                if (g_lib.create_decoder((uint32_t)lzma, &IID_ICompressCoder, dec.pv()) != S_OK || !dec) {
+                if (CreateDecoder((uint32_t)lzma, &IID_ICompressCoder, dec.pv()) != S_OK || !dec) {
                     failed = true;
                     return;
                 }
@@ -1437,7 +1437,7 @@ Result run(const std::vector<std::string> &args, Ui &ui)
     Options o;
     std::string error;
     if (!available()) {
-        add_error(r, ui, "7-Zip's library (7z.so) was not found: install the 7zip package");
+        add_error(r, ui, "7-Zip's library (7z.so) is not usable: " + program());
     } else if (!parse(args, o, error)) {
         add_error(r, ui, error);
     } else if (o.cmd == "a" || o.cmd == "u" || o.cmd == "d" || o.cmd == "rn") {

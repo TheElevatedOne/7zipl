@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
-// 7zipl: loads 7-Zip's plugin library 7z.so from the distribution's 7zip package and uses its archive
-// handlers directly: format detection, opening (volumes, nested and embedded archives), listing and
+// 7zipl: uses the archive handlers of 7-Zip's library 7z.so (the distribution's 7zip package, linked at
+// build time, declared in sevenzip.hpp) directly: format detection, opening (volumes, nested and embedded archives), listing and
 // extracting. Updating, hashing and the benchmark are in engine_ops.cpp.
 #include "engine_impl.hpp"
 
@@ -92,7 +92,7 @@ std::wstring s2w(const std::string &s)
 BSTR make_bstr(const std::string &s)
 {
     const std::wstring w = s2w(s);
-    return g_lib.alloc_string(w.c_str(), (uint32_t)w.size());
+    return SysAllocStringLen(w.c_str(), (uint32_t)w.size());
 }
 
 std::string lower(const std::string &s)
@@ -169,7 +169,7 @@ std::string op_result_text(int32_t r, bool encrypted)
 
 void Prop::clear()
 {
-    if (vt == VT_BSTR && bstrVal && g_lib.free_string) g_lib.free_string(bstrVal);
+    if (vt == VT_BSTR && bstrVal) SysFreeString(bstrVal);
     std::memset(static_cast<PROPVARIANT *>(this), 0, sizeof(PROPVARIANT));
 }
 
@@ -604,7 +604,7 @@ HRESULT try_open(int fi, IInStream *stream, OpenCallback *cb, uint64_t max_check
                  std::string *why = nullptr)
 {
     Com<IInArchive> a;
-    HRESULT hr = g_lib.create_object(&g_fmt[fi].clsid, &IID_IInArchive, a.pv());
+    HRESULT hr = CreateObject(&g_fmt[fi].clsid, &IID_IInArchive, a.pv());
     if (hr != S_OK || !a) return hr == S_OK ? E_FAIL : hr;
     stream->Seek(0, 0, nullptr);
     hr = a->Open(stream, &max_check, cb);
@@ -764,8 +764,8 @@ bool open(const std::string &path, const std::string &type, Ui &ui, const std::s
         o.password = *password;
         o.password_given = !password->empty();
     }
-    if (!g_lib.handle) {
-        error = "7-Zip's library (7z.so) was not found: install the 7zip package";
+    if (!g_lib.ok) {
+        error = "7-Zip's library (7z.so) is not usable: " + g_load_error;
         return false;
     }
     int err = 0;
@@ -1283,35 +1283,27 @@ void set_memory_limit(uint64_t bytes) { g_memory_limit = bytes; }
 
 namespace {
 
-std::string find_library()
+// The file 7z.so was loaded from (the dynamic loader found it through the RUNPATH set at build time).
+std::string library_path()
 {
-    if (const char *e = g_getenv("SZL_7Z_SO"); e && *e) return e;
-    static const char *const paths[] = {
-        "/usr/lib/7zip/7z.so",      // Arch, Debian, Ubuntu
-        "/usr/libexec/7zip/7z.so",  // Fedora
-        "/usr/lib64/7zip/7z.so",
-        "/usr/local/lib/7zip/7z.so",
-    };
-    for (const char *p : paths)
-        if (g_file_test(p, G_FILE_TEST_IS_REGULAR)) return p;
-    return {};
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void *>(&CreateObject), &info) && info.dli_fname) return info.dli_fname;
+    return "7z.so";
 }
-
-template <class F> F sym(const char *name) { return reinterpret_cast<F>(dlsym(g_lib.handle, name)); }
 
 std::string handler_str(uint32_t i, PROPID id)
 {
     Prop p;
     std::string s;
-    if (g_lib.handler_prop(i, id, &p) == S_OK) p.get_str(s);
+    if (GetHandlerProperty2(i, id, &p) == S_OK) p.get_str(s);
     return s;
 }
 
 std::string handler_bin(uint32_t i, PROPID id)
 {
     Prop p;
-    if (g_lib.handler_prop(i, id, &p) != S_OK || p.vt != VT_BSTR || !p.bstrVal) return {};
-    const uint32_t n = g_lib.string_bytes(p.bstrVal);
+    if (GetHandlerProperty2(i, id, &p) != S_OK || p.vt != VT_BSTR || !p.bstrVal) return {};
+    const uint32_t n = SysStringByteLen(p.bstrVal);
     return std::string(reinterpret_cast<const char *>(p.bstrVal), n);
 }
 
@@ -1325,67 +1317,32 @@ std::vector<std::string> words(const std::string &s)
     return out;
 }
 
-void unload(const std::string &why)
-{
-    g_load_error = why;
-    dlclose(g_lib.handle);
-    g_lib = Lib();
-}
-
 }  // namespace
 
 void init(const char *)
 {
     if (g_inited) return;
     g_inited = true;
-    const std::string path = find_library();
-    if (path.empty()) {
-        g_load_error = "7z.so not found";
-        return;
-    }
-    void *h = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
-    if (!h) {
-        g_load_error = dlerror();
-        return;
-    }
-    g_lib.handle = h;
-    auto module_prop = sym<Func_GetModuleProp>("GetModuleProp");
-    g_lib.create_object = sym<Func_CreateObject>("CreateObject");
-    g_lib.num_formats = sym<Func_GetNumberOfFormats>("GetNumberOfFormats");
-    g_lib.handler_prop = sym<Func_GetHandlerProperty2>("GetHandlerProperty2");
-    g_lib.get_is_arc = sym<Func_GetIsArc>("GetIsArc");
-    g_lib.num_methods = sym<Func_GetNumberOfMethods>("GetNumberOfMethods");
-    g_lib.method_prop = sym<Func_GetMethodProperty>("GetMethodProperty");
-    g_lib.create_encoder = sym<Func_CreateCoder>("CreateEncoder");
-    g_lib.create_decoder = sym<Func_CreateCoder>("CreateDecoder");
-    g_lib.get_hashers = sym<Func_GetHashers>("GetHashers");
-    g_lib.alloc_string = sym<Func_SysAllocStringLen>("SysAllocStringLen");
-    g_lib.free_string = sym<Func_SysFreeString>("SysFreeString");
-    g_lib.string_bytes = sym<Func_SysStringByteLen>("SysStringByteLen");
-    if (!module_prop || !g_lib.create_object || !g_lib.num_formats || !g_lib.handler_prop || !g_lib.alloc_string ||
-        !g_lib.free_string || !g_lib.string_bytes) {
-        unload(path + " is not a 7-Zip 23 or newer library");
-        return;
-    }
+    g_lib.path = library_path();
     {
         Prop p;
         uint64_t v = 1;
         // Interface type 0: IUnknown without a virtual destructor (7-Zip 23+). p7zip-style libraries differ.
-        if (module_prop(module_prop::kInterfaceType, &p) == S_OK) p.get_u64(v);
+        if (GetModuleProp(module_prop::kInterfaceType, &p) == S_OK) p.get_u64(v);
         if (v != 0) {
-            unload(path + " uses an incompatible interface (p7zip?)");
+            g_load_error = g_lib.path + " uses an incompatible interface (p7zip?)";
             return;
         }
         p.clear();
-        if (module_prop(module_prop::kVersion, &p) == S_OK && p.get_u64(v)) g_lib.version = (unsigned)v;
+        if (GetModuleProp(module_prop::kVersion, &p) == S_OK && p.get_u64(v)) g_lib.version = (unsigned)v;
     }
-    g_lib.path = path;
+    g_lib.ok = true;
     char vb[32];
     std::snprintf(vb, sizeof vb, "%u.%02u", g_lib.version >> 16, g_lib.version & 0xFFFF);
     g_version = vb;
 
     uint32_t n = 0;
-    g_lib.num_formats(&n);
+    GetNumberOfFormats(&n);
     for (uint32_t i = 0; i < n; i++) {
         Format f;
         f.name = handler_str(i, handler_prop::kName);
@@ -1396,11 +1353,11 @@ void init(const char *)
         f.add_exts = words(handler_str(i, handler_prop::kAddExtension));
         Prop p;
         uint64_t v;
-        if (g_lib.handler_prop(i, handler_prop::kUpdate, &p) == S_OK) f.update = p.get_bool();
+        if (GetHandlerProperty2(i, handler_prop::kUpdate, &p) == S_OK) f.update = p.get_bool();
         p.clear();
-        if (g_lib.handler_prop(i, handler_prop::kFlags, &p) == S_OK && p.get_u64(v)) f.flags = (uint32_t)v;
+        if (GetHandlerProperty2(i, handler_prop::kFlags, &p) == S_OK && p.get_u64(v)) f.flags = (uint32_t)v;
         p.clear();
-        if (g_lib.handler_prop(i, handler_prop::kSignatureOffset, &p) == S_OK && p.get_u64(v)) f.sig_offset = (uint32_t)v;
+        if (GetHandlerProperty2(i, handler_prop::kSignatureOffset, &p) == S_OK && p.get_u64(v)) f.sig_offset = (uint32_t)v;
         const std::string sig = handler_bin(i, handler_prop::kSignature);
         if (!sig.empty()) f.sigs.push_back(sig);
         const std::string multi = handler_bin(i, handler_prop::kMultiSignature);
@@ -1410,13 +1367,13 @@ void init(const char *)
             f.sigs.push_back(multi.substr(k + 1, len));
             k += 1 + len;
         }
-        if (g_lib.get_is_arc) g_lib.get_is_arc(i, &f.is_arc);
+        GetIsArc(i, &f.is_arc);
         g_fmt.push_back(std::move(f));
     }
 
-    if (g_lib.get_hashers) {
+    {
         Com<IHashers> hs;
-        if (g_lib.get_hashers(hs.put()) == S_OK && hs) {
+        if (GetHashers(hs.put()) == S_OK && hs) {
             const uint32_t nh = hs->GetNumHashers();
             for (uint32_t i = 0; i < nh; i++) {
                 Prop p;
@@ -1428,8 +1385,8 @@ void init(const char *)
     }
 }
 
-bool available() { return g_lib.handle != nullptr; }
-std::string program() { return g_lib.handle ? g_lib.path : g_load_error; }
+bool available() { return g_lib.ok; }
+std::string program() { return g_lib.ok ? g_lib.path : g_load_error; }
 std::string version() { return g_version; }
 
 std::vector<FormatInfo> formats()
@@ -1511,7 +1468,7 @@ ArchiveListing open_archive(const std::string &path, Ui &ui, const std::string &
             if (a->GetArchivePropertyInfo(i, &name, &id, &vt) != S_OK) continue;
             std::string label = prop_name(id);
             if (label.empty() && name) label = w2s(name);
-            if (name) g_lib.free_string(name);
+            if (name) SysFreeString(name);
             if (id == kpidErrorFlags || id == kpidWarningFlags || id == kpidError || id == kpidWarning) continue;
             Prop p;
             if (a->GetArchiveProperty(id, &p) != S_OK || p.empty()) continue;

@@ -91,10 +91,9 @@ void activate(GtkApplication *app, AppState *st)
         w->open_path(files.empty() ? std::string() : files[0]);
         w->present();
         if (!available())
-            show_message(w->window(), "7-Zip not found",
-                         "7zipl uses 7-Zip's library (7z.so) to open and create archives, but it couldn't be loaded:\n" +
-                             program() +
-                             "\n\nInstall your distribution's 7zip package (Arch, Debian 13, Ubuntu 24.04, Fedora: 7zip).",
+            show_message(w->window(), "7-Zip library not usable",
+                         "7zipl uses 7-Zip's library (7z.so) to open and create archives, but it can't use this one:\n" +
+                             program() + "\n\nInstall 7-Zip 23 or newer (your distribution's 7zip package).",
                          true);
         if (!o.screenshot.empty()) {
             struct S {

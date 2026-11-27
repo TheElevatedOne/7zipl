@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
-// 7zipl: the 7-Zip engine behind a small C++ API. It loads 7-Zip's library 7z.so from the distribution's 7zip
+// 7zipl: the 7-Zip engine behind a small C++ API. It links 7-Zip's library 7z.so from the distribution's 7zip
 // package and uses its archive handlers, codecs and hashers in-process (engine.cpp, engine_ops.cpp).
 #pragma once
 
@@ -95,10 +95,10 @@ struct Result {
     HashResult hash;
 };
 
-// Loads 7z.so (SZL_7Z_SO, else the 7zip package's path) and reads its formats and hashers. Call once at startup.
+// Checks that 7z.so has the 7-Zip 23+ interface and reads its formats and hashers. Call once at startup.
 void init(const char *argv0);
-bool available();                // 7z.so was loaded
-std::string program();           // its path, or why it couldn't be loaded
+bool available();                // 7z.so is usable
+std::string program();           // its path, or why it isn't usable
 // Memory archives may use to unpack without asking; 0 = no limit.
 void set_memory_limit(uint64_t bytes);
 

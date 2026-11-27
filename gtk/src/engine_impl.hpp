@@ -16,21 +16,9 @@ namespace szl::impl {
 using namespace sz;
 
 struct Lib {
-    void *handle = nullptr;
+    bool ok = false;  // 7z.so has a compatible interface
     std::string path;
     unsigned version = 0;  // (major << 16) | minor
-    Func_CreateObject create_object = nullptr;
-    Func_GetNumberOfFormats num_formats = nullptr;
-    Func_GetHandlerProperty2 handler_prop = nullptr;
-    Func_GetIsArc get_is_arc = nullptr;
-    Func_GetNumberOfMethods num_methods = nullptr;
-    Func_GetMethodProperty method_prop = nullptr;
-    Func_CreateCoder create_encoder = nullptr;
-    Func_CreateCoder create_decoder = nullptr;
-    Func_GetHashers get_hashers = nullptr;
-    Func_SysAllocStringLen alloc_string = nullptr;
-    Func_SysFreeString free_string = nullptr;
-    Func_SysStringByteLen string_bytes = nullptr;
 };
 extern Lib g_lib;
 extern uint64_t g_memory_limit;

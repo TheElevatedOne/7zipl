@@ -52,7 +52,7 @@ int main(int argc, char **argv)
         if (szl::available())
             std::printf("7zipl %s (7-Zip %s, %s)\n", SZL_VERSION, szl::version().c_str(), szl::program().c_str());
         else
-            std::printf("7zipl %s (7-Zip library not loaded: %s)\n", SZL_VERSION, szl::program().c_str());
+            std::printf("7zipl %s (7-Zip library not usable: %s)\n", SZL_VERSION, szl::program().c_str());
         return 0;
     }
     if (profile) szl::set_config_dir(profile);
