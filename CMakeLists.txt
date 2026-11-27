@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(7zipl VERSION 0.1.0 LANGUAGES C CXX)
 
-# 7zipl: a native GTK 4 front-end for 7-Zip on Linux. It runs the system's 7-Zip (7zz or 7z from the
-# distribution's 7zip package); the GUI lives in gtk/.
+# 7zipl: a native GTK 4 front-end for 7-Zip on Linux. It loads 7-Zip's library (7z.so from the
+# distribution's 7zip package) at run time; the GUI lives in gtk/.
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,6 +34,7 @@ add_executable(7zipl
   ${SZL_RESOURCES}
   gtk/src/main.cpp
   gtk/src/engine.cpp
+  gtk/src/engine_ops.cpp
   gtk/src/app.cpp
   gtk/src/gtkutil.cpp
   gtk/src/style.cpp
@@ -58,7 +59,7 @@ target_compile_definitions(7zipl PRIVATE
   GDK_DISABLE_DEPRECATION_WARNINGS)
 target_compile_options(7zipl PRIVATE ${SZL_WARN})
 pkg_check_modules(GIO_UNIX REQUIRED IMPORTED_TARGET gio-unix-2.0)
-target_link_libraries(7zipl PRIVATE Threads::Threads PkgConfig::GTK4 PkgConfig::GIO_UNIX)
+target_link_libraries(7zipl PRIVATE Threads::Threads ${CMAKE_DL_LIBS} PkgConfig::GTK4 PkgConfig::GIO_UNIX)
 
 install(TARGETS 7zipl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 

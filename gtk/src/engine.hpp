@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
-// 7zipl: the 7-Zip engine behind a small C++ API. Operations run the system's 7-Zip (7zz or 7z from the
-// distribution's 7zip package) as a child process; engine.cpp turns its console output into these structures.
+// 7zipl: the 7-Zip engine behind a small C++ API. It loads 7-Zip's library 7z.so from the distribution's 7zip
+// package and uses its archive handlers, codecs and hashers in-process (engine.cpp, engine_ops.cpp).
 #pragma once
 
 #include <cstdint>
@@ -21,16 +21,12 @@ public:
 
     virtual void set_total(uint64_t bytes) = 0;
     virtual void set_completed(uint64_t bytes) = 0;
-    // Progress when the total size isn't known (7-Zip reports only a percentage).
-    virtual void set_percent(unsigned percent) { (void)percent; }
     virtual void set_ratio(uint64_t in, uint64_t out) = 0;
     virtual void set_num_files(uint64_t files) = 0;
     virtual void file_done() = 0;
     virtual void set_current(const std::string &what, const std::string &name) = 0;
     // true when the user cancelled; blocks while the operation is paused.
     virtual bool cancelled() = 0;
-    // true while the user has paused the operation (the 7-Zip process is stopped meanwhile).
-    virtual bool paused() { return false; }
     // Asks for a password. Returns false when the user cancels.
     virtual bool ask_password(const std::string &archive, std::string &password) = 0;
     virtual Overwrite ask_overwrite(const std::string &existing, uint64_t existing_size, int64_t existing_mtime,
@@ -99,10 +95,10 @@ struct Result {
     HashResult hash;
 };
 
-// Finds 7-Zip (SZL_7Z, then 7zz, 7z, 7za on PATH) and reads its formats and hashers. Call once at startup.
+// Loads 7z.so (SZL_7Z_SO, else the 7zip package's path) and reads its formats and hashers. Call once at startup.
 void init(const char *argv0);
-bool available();                // 7-Zip was found
-std::string program();           // its path
+bool available();                // 7z.so was loaded
+std::string program();           // its path, or why it couldn't be loaded
 // Memory archives may use to unpack without asking; 0 = no limit.
 void set_memory_limit(uint64_t bytes);
 
@@ -121,8 +117,8 @@ ArchiveListing open_archive(const std::string &path, Ui &ui, const std::string &
                             const std::string &type = {});
 
 // Runs a 7-Zip command line (without the program name), e.g. {"x", "a.7z", "-o/tmp/out"} or
-// {"a", "-t7z", "-mx9", "new.7z", "file"}: x e t a u d rn h, with 7-Zip's switches. A "-pPASSWORD" switch is
-// answered through 7-Zip's password prompt instead of being passed on the command line.
+// {"a", "-t7z", "-mx9", "new.7z", "file"}: x e t a u d rn h, with the 7-Zip switches the GUI uses
+// (-t -m -p -v -o -ao -y -spf -spf2 -snl -snh -sdel -spd -spe -scrc -w -u).
 Result run(const std::vector<std::string> &args, Ui &ui);
 
 // Extracts the given items (indices of an open archive listing) of `archive` to `out_dir`.

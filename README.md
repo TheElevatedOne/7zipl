@@ -5,8 +5,8 @@
 <p align="center"><img src="data/icons/org.sevenzipl.SevenZipL.svg" alt="7zipl icon: a blue box with a zipper between a 7 and a z" width="128"></p>
 
 The 7-Zip File Manager for Linux, rewritten with plain GTK 4 (no libadwaita). It is only the front-end: every
-archive operation runs the [7-Zip] installed from your distribution's `7zip` package (`7zz` or `7z`), so you get
-its formats, compression settings and security updates, with the File Manager's window, dialogs and keyboard
+archive operation uses the library of the [7-Zip] installed from your distribution's `7zip` package (`7z.so`),
+so you get its formats, compression settings and security updates, with the File Manager's window, dialogs and keyboard
 shortcuts.
 
 The Windows File Manager (`7zFM.exe`) and `7zG.exe` don't exist on Linux; 7zipl replaces both. This repository
@@ -37,16 +37,16 @@ contains no 7-Zip code.
 |---|---|---|
 | File manager | `7zipl` (window class `7zipl`) | browsing folders and archives, all archive operations |
 | File-manager actions | `7zipl --extract`, `--extract-here`, `--compress`, … | "Extract here" / "Add to archive" entries in other file managers (what `7zG` does on Windows) |
-| Engine | `7zz` or `7z` from the `7zip` package (not part of 7zipl) | every archive operation, run as a child process |
+| Engine | `7z.so` from the `7zip` package (not part of 7zipl) | every archive operation, loaded into 7zipl |
 | Desktop entry | `org.sevenzipl.SevenZipL.desktop` | launchers and "Open With" for archive types |
 
 ## Features
 
-- **Uses the system 7-Zip**: operations run `7zz` (or `7z`, `7za`; `SZL_7Z` picks another one) with the same
-  switches you would type, and 7zipl reads its progress and results. The formats and hashers in the dialogs
-  come from `7z i`. Passwords and overwrite answers go to 7-Zip's prompts, never on the command line, so other
-  users can't see them in the process list. Pause stops the 7-Zip process; Cancel interrupts it, and 7-Zip
-  cleans up its temporary files.
+- **Uses the system 7-Zip library**: 7zipl loads `7z.so` from the `7zip` package (`SZL_7Z_SO` picks another one)
+  and calls its archive handlers, codecs and hashers directly, the way 7-Zip's own programs do. Formats, hash
+  methods and compression settings come from the library, and progress, Pause and Cancel work per byte.
+  Passwords stay inside the process. Links that would point outside the output folder are refused when
+  extracting, as in 7-Zip.
 - **Archives as folders**: open an archive and browse it like a folder; archives inside archives (`.tar.gz` →
   `.tar` → files) open on <kbd>Enter</kbd>, one level per archive. The address bar takes paths inside archives
   (`~/a.7z/docs/img`).
@@ -77,15 +77,16 @@ contains no 7-Zip code.
 ## Requirements
 
 - Linux with GTK 4.14 or newer and GLib 2.76 or newer
-- 7-Zip 21 or newer from your distribution:
+- 7-Zip 23 or newer from your distribution, which provides `7z.so`:
 
-  | Distribution | Package | Program |
+  | Distribution | Package | Library |
   |---|---|---|
-  | Arch Linux | `7zip` | `7z` |
-  | Debian 12+, Ubuntu 23.04+ | `7zip` | `7zz` |
-  | Fedora 39+ | `7zip` | `7z`, `7zz` |
+  | Arch Linux | `7zip` | `/usr/lib/7zip/7z.so` |
+  | Debian 13, Ubuntu 24.04 and newer | `7zip` | `/usr/lib/7zip/7z.so` |
+  | Fedora | `7zip` | `/usr/libexec/7zip/7z.so` |
 
-  The old `p7zip` (16.02) is not supported. Without 7-Zip, 7zipl starts and tells you to install it.
+  Debian 12's `7zip` package has no `7z.so`, and the old `p7zip` (16.02) is not supported. Without the
+  library, 7zipl starts and tells you to install it.
 - To build: a C++17 compiler (GCC or Clang), CMake 3.16+, Ninja or Make, pkg-config
 
 ## Installation
@@ -167,7 +168,7 @@ These run without the main window, for file-manager context menus:
 | `7zipl --compress-to 7z FILE...` | adds to `<name>.7z` with the saved settings (also `zip`, `tar`, `xz`, …) |
 | `7zipl --test FILE...` | tests the archives |
 | `7zipl --hash SHA256 FILE...` | checksums (`*` for every method) |
-| `7zipl --version` | prints the 7zipl version and the 7-Zip version and path it uses |
+| `7zipl --version` | prints the 7zipl version and the version and path of the 7-Zip library it uses |
 | `7zipl --profile DIR` | uses `DIR` for settings instead of `~/.config/7zipl` |
 
 ### Keyboard shortcuts
@@ -234,10 +235,11 @@ Temporary copies (View/Edit inside an archive, nested archives) go to `$XDG_RUNT
 ctest --test-dir build --output-on-failure
 ```
 
-runs `7zipl --selftest` (126 checks; it needs 7-Zip installed):
+runs `7zipl --selftest` (130 checks; it needs 7-Zip installed):
 
-- The engine (through the system 7-Zip): create, list, extract (with a folder prefix removed), test, rename,
-  delete, hash, encrypted headers, zip/tar/gz, Open Inside #, the benchmark, and the working folder.
+- The engine (through `7z.so`): create, list, extract (with a folder prefix removed), test, rename, delete, hash,
+  encrypted headers, zip/tar/gz, symbolic links and the link safety check, Open Inside #, the benchmark, and the
+  working folder.
 - Split and Combine.
 - Desktop integration: the user desktop entry, default applications, and every context-menu writer.
 - The main window: browsing into archives, adding a file into an archive folder, Flat View, view modes, 2 panels,
@@ -256,7 +258,6 @@ GDK_BACKEND=broadway BROADWAY_DISPLAY=:5 GDK_DEBUG=no-portals ./build/7zipl --se
 - Archives inside archives are read-only (changes would have to be packed back into the outer archive).
 - Formats 7-Zip can only read (rar, iso, dmg, …) can't be changed; delete, rename and add are disabled for them.
 - zstd archives can be extracted but not created (7-Zip has a zstd decoder only).
-- Progress while extracting shows a percentage, not byte counts (7-Zip's console reports only that).
 
 ## License
 

@@ -1,5 +1,5 @@
 pkgbase = 7zipl-bin
-	pkgdesc = 7-Zip File Manager for Linux with a plain GTK 4 interface, using the system 7-Zip (prebuilt)
+	pkgdesc = 7-Zip File Manager for Linux with a plain GTK 4 interface, using the system 7-Zip library (prebuilt)
 	pkgver = 0.1.0
 	pkgrel = 1
 	url = https://github.com/TheElevatedOne/7zipl

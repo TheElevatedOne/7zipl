@@ -38,8 +38,6 @@ public:
     // Ui (worker thread)
     void set_total(uint64_t v) override { total_ = v; }
     void set_completed(uint64_t v) override { completed_ = v; }
-    void set_percent(unsigned p) override { percent_ = p; }
-    bool paused() override { return paused_ && !cancel_; }
     void set_ratio(uint64_t in, uint64_t out) override
     {
         ratio_in_ = in;
@@ -85,7 +83,6 @@ private:
     JobDone done_;
     std::thread thread_;
 
-    std::atomic<unsigned> percent_{0};
     std::atomic<uint64_t> total_{0}, completed_{0}, ratio_in_{0}, ratio_out_{0}, num_files_{0}, files_done_{0};
     std::atomic<bool> cancel_{false}, paused_{false};
     std::atomic<bool> prompting_{false};
@@ -187,14 +184,9 @@ void Job::update()
     const uint64_t total = total_, done = completed_;
     if (!shown_ && (int)ms >= spec_.show_delay_ms) present();
     gtk_label_set_text(GTK_LABEL(l_elapsed_), format_duration(ms / 1000).c_str());
-    const unsigned percent = percent_;
     if (total && done && done <= total && ms > 1000) {
         const double rate = (double)done / ms;
         gtk_label_set_text(GTK_LABEL(l_remaining_), format_duration((uint64_t)((total - done) / rate / 1000)).c_str());
-    } else if (!total && percent && ms > 1000) {
-        // Only a percentage is known (extracting): estimate from it.
-        gtk_label_set_text(GTK_LABEL(l_remaining_),
-                           format_duration(ms * (100 - std::min(percent, 100u)) / percent / 1000).c_str());
     } else {
         gtk_label_set_text(GTK_LABEL(l_remaining_), "");
     }
@@ -203,15 +195,15 @@ void Job::update()
     if (nf) files += " / " + format_number(nf);
     gtk_label_set_text(GTK_LABEL(l_files_), files.c_str());
     gtk_label_set_text(GTK_LABEL(l_total_), total ? format_size_short(total).c_str() : "");
-    gtk_label_set_text(GTK_LABEL(l_processed_), total || done ? format_size_short(done).c_str() : "");
-    if (ms > 500 && (total || done)) gtk_label_set_text(GTK_LABEL(l_speed_), (format_size_short(done * 1000 / ms) + "/s").c_str());
+    gtk_label_set_text(GTK_LABEL(l_processed_), format_size_short(done).c_str());
+    if (ms > 500) gtk_label_set_text(GTK_LABEL(l_speed_), (format_size_short(done * 1000 / ms) + "/s").c_str());
     if (spec_.show_ratio) {
         const uint64_t in = ratio_in_, out = ratio_out_;
         gtk_label_set_text(GTK_LABEL(l_ratio_), in ? (std::to_string(out * 100 / in) + "%").c_str() : "");
         gtk_label_set_text(GTK_LABEL(l_packed_), out ? format_size_short(out).c_str() : "");
     }
-    const int pct = total ? (int)(done * 100 / total) : (int)std::min(percent, 100u);
-    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(bar_), total ? std::min(1.0, (double)done / total) : pct / 100.0);
+    const int pct = total ? (int)(done * 100 / total) : 0;
+    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(bar_), total ? std::min(1.0, (double)done / total) : 0.0);
     {
         std::lock_guard<std::mutex> l(mu_);
         gtk_label_set_text(GTK_LABEL(l_what_), what_.c_str());

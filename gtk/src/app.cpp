@@ -92,8 +92,9 @@ void activate(GtkApplication *app, AppState *st)
         w->present();
         if (!available())
             show_message(w->window(), "7-Zip not found",
-                         "7zipl needs 7-Zip to open and create archives, but neither 7zz nor 7z was found.\n\n"
-                         "Install your distribution's 7zip package (Arch: 7zip, Debian/Ubuntu: 7zip, Fedora: 7zip).",
+                         "7zipl uses 7-Zip's library (7z.so) to open and create archives, but it couldn't be loaded:\n" +
+                             program() +
+                             "\n\nInstall your distribution's 7zip package (Arch, Debian 13, Ubuntu 24.04, Fedora: 7zip).",
                          true);
         if (!o.screenshot.empty()) {
             struct S {

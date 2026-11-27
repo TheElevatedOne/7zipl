@@ -14,6 +14,7 @@
 #include <glib/gstdio.h>
 
 #include <algorithm>
+#include <unistd.h>
 #include <cstdio>
 #include <functional>
 
@@ -92,7 +93,7 @@ bool wait_for(const std::function<bool()> &pred, int timeout_ms = 20000)
 
 void engine_tests(const std::string &tmp)
 {
-    check(available(), "7-Zip found: " + program());
+    check(available(), "7z.so loaded: " + program());
     check(!formats().empty(), "formats loaded");
     const auto up = update_formats();
     check(std::find(up.begin(), up.end(), "7z") != up.end(), "7z can be created");
@@ -137,6 +138,24 @@ void engine_tests(const std::string &tmp)
     // Whole archive through the command line path.
     r = run({"x", "-o" + path_join(tmp, "out2"), "-y", "--", arc}, ui);
     check(r.ok && read_file(path_join(tmp, "out2/sub/b.txt")) == "hello", "x whole archive");
+
+    // Symbolic links (-snl): stored as links and recreated; links leaving the output folder are refused.
+    {
+        const std::string ld = path_join(tmp, "links");
+        write_file(path_join(ld, "target.txt"), "t");
+        check(symlink("target.txt", path_join(ld, "ok").c_str()) == 0 && symlink("/etc", path_join(ld, "evil").c_str()) == 0,
+              "make test links");
+        const std::string la = path_join(tmp, "links.7z");
+        r = run({"a", "-snl", "-spd", "--", la, ld}, ui);
+        check(r.ok, "add symbolic links: " + r.summary);
+        const std::string lo = path_join(tmp, "out-links");
+        r = run({"x", "-o" + lo, "--", la}, ui);
+        gchar *t = g_file_read_link(path_join(lo, "links/ok").c_str(), nullptr);
+        check(t && std::string(t) == "target.txt", "symbolic link recreated");
+        g_free(t);
+        check(!r.ok && !g_file_test(path_join(lo, "links/evil").c_str(), G_FILE_TEST_IS_SYMLINK),
+              "link pointing outside the output folder refused");
+    }
 
     req = {};
     req.archive = arc;

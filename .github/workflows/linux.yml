@@ -1,4 +1,4 @@
-# Builds 7zipl (a GTK 4 front-end for the system 7-Zip) on Arch Linux and runs its self-test on GTK's offscreen
+# Builds 7zipl (a GTK 4 front-end for the system 7-Zip library) on Arch Linux and runs its self-test on GTK's offscreen
 # Broadway backend. Pushing a tag such as 0.1.0 also publishes a GitHub release with the x86_64 tarball,
 # which the 7zipl-bin AUR package downloads. The release notes are the tag's section in CHANGELOG.md.
 name: Linux GTK build
