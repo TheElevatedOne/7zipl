@@ -1,703 +1,842 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
-// 7zipl: glue between the GTK front-end and 7-Zip's UI/Common code. It plays the part that
-// FileManager/ExtractCallback.cpp, GUI/UpdateGUI.cpp and Console/Main.cpp play in upstream 7-Zip.
-
-#include "CPP/Common/Common.h"
-#include "CPP/Common/MyWindows.h"
-
-#include "C/7zVersion.h"
-#include "C/CpuArch.h"
-
-#include "CPP/Common/MyInitGuid.h"
-
-#include "CPP/Common/IntToString.h"
-#include "CPP/Common/MyException.h"
-#include "CPP/Common/StringConvert.h"
-#include "CPP/Common/Wildcard.h"
-
-#include "CPP/Windows/ErrorMsg.h"
-#include "CPP/Windows/FileDir.h"
-#include "CPP/Windows/FileName.h"
-#include "CPP/Windows/PropVariant.h"
-#include "CPP/Windows/PropVariantConv.h"
-#include "CPP/Windows/TimeUtils.h"
-
-#include "CPP/7zip/Common/RegisterCodec.h"
-#include "CPP/7zip/UI/Common/ArchiveCommandLine.h"
-#include "CPP/7zip/UI/Common/Bench.h"
-#include "CPP/7zip/UI/Common/ArchiveExtractCallback.h"
-#include "CPP/7zip/UI/Common/ArchiveOpenCallback.h"
-#include "CPP/7zip/UI/Common/Extract.h"
-#include "CPP/7zip/UI/Common/HashCalc.h"
-#include "CPP/7zip/UI/Common/LoadCodecs.h"
-#include "CPP/7zip/UI/Common/OpenArchive.h"
-#include "CPP/7zip/UI/Common/PropIDUtils.h"
-#include "CPP/7zip/UI/Common/SetProperties.h"
-#include "CPP/7zip/UI/Common/Update.h"
-
+// 7zipl: runs the system's 7-Zip (7zz / 7z from the distribution's package) and turns its console
+// output into the engine API. Passwords and overwrite answers go to 7-Zip's prompts on stdin, never on
+// the command line.
 #include "engine.hpp"
 
+#include <glib.h>
+#include <glib/gstdio.h>
+
 #include <algorithm>
-#include <atomic>
-#include <mutex>
-
-extern unsigned g_NumHashers;
-extern const CHasherInfo *g_Hashers[];
-void Set_ModuleDirPrefix_From_ProgArg0(const char *s);
-
-using namespace NWindows;
+#include <cerrno>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace szl {
 
 namespace {
 
-CCodecs *g_codecs = nullptr;
-CMyComPtr<IUnknown> g_codecs_ref;
+std::string g_prog;     // the 7-Zip binary
+std::string g_version;  // "26.06"
+std::vector<FormatInfo> g_formats;
+std::vector<std::string> g_hashers;
+uint64_t g_memory_limit = 0;
+bool g_inited = false;
 
-std::string u2s(const UString &u)
+std::string trim(const std::string &s)
 {
-    AString a;
-    ConvertUnicodeToUTF8(u, a);
-    return std::string(a.Ptr(), a.Len());
-}
-std::string u2s(const wchar_t *u) { return u ? u2s(UString(u)) : std::string(); }
-UString s2u(const std::string &s)
-{
-    UString u;
-    ConvertUTF8ToUnicode(AString(s.c_str()), u);
-    return u;
-}
-std::string f2s(const FString &f) { return std::string(f.Ptr(), f.Len()); }  // FString is UTF-8 on Linux
-
-std::string hresult_text(HRESULT r)
-{
-    if (r == E_OUTOFMEMORY) return "Can't allocate required memory";
-    if (r == E_ABORT) return "Operation was cancelled";
-    if (r == E_NOTIMPL) return "Not implemented";
-    if (r == S_FALSE) return "Error";
-    return u2s(NError::MyFormatMessage(r));
+    size_t a = 0, b = s.size();
+    while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r')) a++;
+    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r')) b--;
+    return s.substr(a, b - a);
 }
 
-int64_t ft_to_unix(const FILETIME &ft) { return NTime::FileTime_To_UnixTime64(ft); }
+bool starts_with(const std::string &s, const char *p) { return s.compare(0, strlen(p), p) == 0; }
 
-const char *extract_error_text(Int32 opRes, Int32 encrypted)
+std::vector<std::string> split_ws(const std::string &s)
 {
-    using namespace NArchive::NExtract::NOperationResult;
-    switch (opRes) {
-    case kUnsupportedMethod: return "Unsupported compression method";
-    case kCRCError: return encrypted ? "CRC Failed in encrypted file. Wrong password?" : "CRC Failed";
-    case kDataError: return encrypted ? "Data Error in encrypted file. Wrong password?" : "Data Error";
-    case kUnavailable: return "Unavailable data";
-    case kUnexpectedEnd: return "Unexpected end of data";
-    case kDataAfterEnd: return "There are some data after the end of the payload data";
-    case kIsNotArc: return "Is not archive";
-    case kHeadersError: return "Headers Error";
-    case kWrongPassword: return "Wrong password";
-    default: return "Error";
+    std::vector<std::string> out;
+    size_t i = 0;
+    while (i < s.size()) {
+        while (i < s.size() && s[i] == ' ') i++;
+        size_t j = i;
+        while (j < s.size() && s[j] != ' ') j++;
+        if (j > i) out.push_back(s.substr(i, j - i));
+        i = j;
     }
+    return out;
 }
 
-std::string open_error_text(const CArchiveLink &link, const std::string &name, HRESULT result)
+uint64_t to_u64(const std::string &s)
 {
-    if (result == E_ABORT) return "Operation was cancelled";
-    if (result == S_FALSE) {
-        if (link.PasswordWasAsked) return "Cannot open encrypted archive '" + name + "'. Wrong password?";
-        return "Cannot open the file '" + name + "' as archive";
-    }
-    return "Cannot open '" + name + "': " + hresult_text(result);
+    const std::string t = trim(s);
+    return t.empty() ? 0 : g_ascii_strtoull(t.c_str(), nullptr, 10);
 }
 
-// Shared state of all callbacks of one operation.
-struct Ctx {
+// "2026-11-27 00:11:35.5774881" (local time, as 7-Zip prints it) to unix seconds.
+bool parse_time(const std::string &s, int64_t &out)
+{
+    int y, mo, d, h, mi, se;
+    if (std::sscanf(s.c_str(), "%d-%d-%d %d:%d:%d", &y, &mo, &d, &h, &mi, &se) != 6) return false;
+    std::tm tm{};
+    tm.tm_year = y - 1900;
+    tm.tm_mon = mo - 1;
+    tm.tm_mday = d;
+    tm.tm_hour = h;
+    tm.tm_min = mi;
+    tm.tm_sec = se;
+    tm.tm_isdst = -1;
+    out = (int64_t)std::mktime(&tm);
+    return true;
+}
+
+// The full path of the first program found on PATH.
+std::string find_program()
+{
+    if (const char *e = g_getenv("SZL_7Z"); e && *e) {
+        char *p = g_find_program_in_path(e);
+        std::string s = p ? p : "";
+        g_free(p);
+        return s;
+    }
+    // 7zz is always Igor Pavlov's 7-Zip (Debian/Ubuntu's 7zip package); 7z is 7-Zip on Arch and Fedora.
+    for (const char *n : {"7zz", "7z", "7za"}) {
+        char *p = g_find_program_in_path(n);
+        if (p) {
+            std::string s = p;
+            g_free(p);
+            return s;
+        }
+    }
+    return {};
+}
+
+bool is_update_command(const std::string &c) { return c == "a" || c == "u" || c == "d" || c == "rn"; }
+bool is_extract_command(const std::string &c) { return c == "x" || c == "e" || c == "t" || c == "l"; }
+
+// ---------- One 7-Zip process ----------
+
+struct Proc {
     Ui &ui;
     Result &res;
-    bool password_defined = false;
-    UString password;
-    bool password_asked = false;
-    std::string archive;  // the archive being processed, for prompts and messages
-    UString current;
-    std::mutex mt;        // 7-Zip may call some callbacks from several threads
+    std::string archive;        // for the password prompt
+    std::string password;       // answer to password prompts
+    bool have_password = false;
+    bool password_asked = false;  // the UI was asked
+    uint64_t total = 0;         // bytes, when known: turns percentages into byte counts
+    std::function<void(const std::string &)> on_line;  // each line of standard output
+    std::function<void(const std::string &)> on_text;  // raw standard output (benchmark)
 
-    Ctx(Ui &u, Result &r) : ui(u), res(r) {}
+    std::vector<std::string> lines;  // all output lines
+    int exit_code = -1;
+    bool cancelled = false;
+    bool failed_to_start = false;
+    uint64_t files_seen = 0;
+    uint64_t mem_required = 0, mem_allowed = 0;  // "Memory usage limit was exceeded"
 
-    HRESULT check() { return ui.cancelled() ? E_ABORT : S_OK; }
-    void error(const std::string &s)
+    Proc(Ui &u, Result &r) : ui(u), res(r) {}
+
+    // Parse state for messages
+    enum class Block { None, Errors, Warnings, ScanWarnings };
+    Block block = Block::None;
+    bool next_is_error = false;
+    std::string pending_error;  // "ERROR: message" may be followed by the file name on its own line
+    bool pending_is_warning = false;
+    // Overwrite prompt
+    int ow_section = 0;
+    std::string ow_path[2];
+    uint64_t ow_size[2] = {0, 0};
+    int64_t ow_time[2] = {0, 0};
+
+    // "errno=2 : No such file or directory" -> "No such file or directory"
+    static std::string clean(std::string s)
     {
+        for (size_t k; (k = s.find("errno=")) != std::string::npos;) {
+            const auto c = s.find(" : ", k);
+            if (c == std::string::npos) break;
+            s.erase(k, c + 3 - k);
+        }
+        return s;
+    }
+    void error(std::string s)
+    {
+        s = clean(s);
+        if (s.empty()) return;
+        for (const auto &m : res.messages)
+            if (m == s || (m.size() > s.size() && m.compare(m.size() - s.size(), s.size(), s) == 0)) return;
         res.errors++;
         res.messages.push_back(s);
         ui.message(Ui::Level::Error, s);
     }
-    void warning(const std::string &s)
+    void warning(std::string s)
     {
+        s = clean(s);
+        if (s.empty()) return;
+        for (const auto &m : res.messages)
+            if (m == s || (m.size() > s.size() && m.compare(m.size() - s.size(), s.size(), s) == 0)) return;
         res.warnings++;
         res.messages.push_back(s);
         ui.message(Ui::Level::Warning, s);
     }
-    HRESULT get_password(BSTR *out)
+
+    void line(const std::string &raw)
     {
-        *out = nullptr;
-        RINOK(check())
-        if (!password_defined) {
-            std::string pw;
-            password_asked = true;
-            if (!ui.ask_password(archive, pw)) return E_ABORT;
-            password = s2u(pw);
-            password_defined = true;
+        const std::string l = trim(raw);
+        lines.push_back(raw);
+        if (on_line) on_line(raw);
+
+        // Overwrite prompt details
+        if (l == "Would you like to replace the existing file:") ow_section = 1;
+        else if (l == "with the file from archive:") ow_section = 2;
+        else if (ow_section && starts_with(l, "Path:")) ow_path[ow_section - 1] = trim(l.substr(5));
+        else if (ow_section && starts_with(l, "Size:")) ow_size[ow_section - 1] = to_u64(l.substr(5));
+        else if (ow_section && starts_with(l, "Modified:")) parse_time(trim(l.substr(9)), ow_time[ow_section - 1]);
+
+        if (!pending_error.empty()) {
+            // "ERROR: message" then the file name: reported as "name : message" (7-Zip's own order).
+            std::string e = std::move(pending_error);
+            const bool warn = pending_is_warning;
+            pending_error.clear();
+            if (!l.empty() && l.find(" = ") == std::string::npos && l.find(": ") == std::string::npos) {
+                // "ERROR: a.7z" + "a.7z": the "Open ERROR" line that follows explains it
+                if (l != e) warn ? warning(l + " : " + e) : error(l + " : " + e);
+                return;
+            }
+            warn ? warning(e) : error(e);
         }
-        return StringToBstr(password, out);
+        if (next_is_error) {
+            next_is_error = false;
+            error(l);
+            return;
+        }
+        if (block != Block::None) {
+            if (block == Block::ScanWarnings) {
+                if (starts_with(l, "----")) block = Block::None;
+                else if (!l.empty()) warning(l);
+                return;
+            }
+            if (l.empty()) {
+                block = Block::None;
+                return;
+            }
+            if (block == Block::Errors) error(l);
+            else warning(l);
+            return;
+        }
+        if (l == "ERROR:") next_is_error = true;
+        else if (starts_with(l, "ERROR: ")) {
+            if (l != "ERROR: Memory usage limit was exceeded.") {
+                pending_error = l.substr(7);
+                pending_is_warning = false;
+            }
+        } else if (starts_with(l, "Open ERROR: ")) error(l.substr(12));
+        else if (starts_with(l, "WARNING: ")) {
+            pending_error = l.substr(9);
+            pending_is_warning = true;
+        }
+        else if (starts_with(l, "Open WARNING: ")) warning(l.substr(14));
+        else if (l == "ERRORS:") block = Block::Errors;
+        else if (l == "WARNINGS:") block = Block::Warnings;
+        else if (l == "Scan WARNINGS for files and folders:") block = Block::ScanWarnings;
+        else if (l == "System ERROR:" || l == "Command Line Error:") next_is_error = true;
+        else if (starts_with(l, "Command Line Error: ")) error(l);
+        else if (l == "Break signaled") cancelled = true;
+        else if (l.find(" GB : required memory usage size") != std::string::npos) mem_required = to_u64(l) << 30;
+        else if (l.find(" GB : allowed memory usage limit") != std::string::npos) mem_allowed = to_u64(l) << 30;
     }
-};
 
-// ---------- Opening archives (IOpenCallbackUI) ----------
-
-class OpenCallback : public IOpenCallbackUI {
-public:
-    explicit OpenCallback(Ctx &c) : ctx(c) {}
-    Z7_IFACE_IMP(IOpenCallbackUI)
-    Ctx &ctx;
-};
-
-HRESULT OpenCallback::Open_CheckBreak() { return ctx.check(); }
-HRESULT OpenCallback::Open_SetTotal(const UInt64 *, const UInt64 *bytes)
-{
-    if (bytes) ctx.ui.set_total(*bytes);
-    return ctx.check();
-}
-HRESULT OpenCallback::Open_SetCompleted(const UInt64 *, const UInt64 *bytes)
-{
-    if (bytes) ctx.ui.set_completed(*bytes);
-    return ctx.check();
-}
-HRESULT OpenCallback::Open_Finished() { return S_OK; }
-HRESULT OpenCallback::Open_CryptoGetTextPassword(BSTR *password) { return ctx.get_password(password); }
-
-// ---------- Extracting and testing ----------
-
-class ExtractCallback Z7_final : public IFolderArchiveExtractCallback,
-                                 public IExtractCallbackUI,
-                                 public IFolderArchiveExtractCallback2,
-                                 public ICryptoGetTextPassword,
-                                 public IArchiveRequestMemoryUseCallback,
-                                 public OpenCallback,
-                                 public CMyUnknownImp {
-    Z7_COM_QI_BEGIN2(IFolderArchiveExtractCallback)
-    Z7_COM_QI_ENTRY(IFolderArchiveExtractCallback2)
-    Z7_COM_QI_ENTRY(ICryptoGetTextPassword)
-    Z7_COM_QI_ENTRY(IArchiveRequestMemoryUseCallback)
-    Z7_COM_QI_END
-    Z7_COM_ADDREF_RELEASE
-
-    Z7_IFACE_COM7_IMP(IProgress)
-    Z7_IFACE_COM7_IMP(IFolderArchiveExtractCallback)
-    Z7_IFACE_IMP(IExtractCallbackUI)
-    Z7_IFACE_COM7_IMP(IFolderArchiveExtractCallback2)
-    Z7_IFACE_COM7_IMP(ICryptoGetTextPassword)
-    Z7_IFACE_COM7_IMP(IArchiveRequestMemoryUseCallback)
-
-public:
-    explicit ExtractCallback(Ctx &c) : OpenCallback(c) {}
-    bool test = false;
-};
-
-Z7_COM7F_IMF(ExtractCallback::SetTotal(UInt64 size))
-{
-    ctx.ui.set_total(size);
-    return ctx.check();
-}
-Z7_COM7F_IMF(ExtractCallback::SetCompleted(const UInt64 *value))
-{
-    if (value) ctx.ui.set_completed(*value);
-    return ctx.check();
-}
-
-Z7_COM7F_IMF(ExtractCallback::AskOverwrite(const wchar_t *existName, const FILETIME *existTime, const UInt64 *existSize,
-                                           const wchar_t *newName, const FILETIME *newTime, const UInt64 *newSize,
-                                           Int32 *answer))
-{
-    std::lock_guard<std::mutex> lock(ctx.mt);
-    RINOK(ctx.check())
-    const Ui::Overwrite a = ctx.ui.ask_overwrite(u2s(existName), existSize ? *existSize : 0,
-                                                 existTime ? ft_to_unix(*existTime) : 0, u2s(newName),
-                                                 newSize ? *newSize : 0, newTime ? ft_to_unix(*newTime) : 0);
-    switch (a) {
-    case Ui::Overwrite::Yes: *answer = NOverwriteAnswer::kYes; break;
-    case Ui::Overwrite::YesAll: *answer = NOverwriteAnswer::kYesToAll; break;
-    case Ui::Overwrite::No: *answer = NOverwriteAnswer::kNo; break;
-    case Ui::Overwrite::NoAll: *answer = NOverwriteAnswer::kNoToAll; break;
-    case Ui::Overwrite::Rename: *answer = NOverwriteAnswer::kAutoRename; break;
-    case Ui::Overwrite::Cancel: *answer = NOverwriteAnswer::kCancel; return E_ABORT;
-    }
-    return S_OK;
-}
-
-Z7_COM7F_IMF(ExtractCallback::PrepareOperation(const wchar_t *name, Int32 isFolder, Int32 askExtractMode,
-                                               const UInt64 *))
-{
-    ctx.current = name;
-    const char *what = "Extracting";
-    switch (askExtractMode) {
-    case NArchive::NExtract::NAskMode::kTest: what = "Testing"; break;
-    case NArchive::NExtract::NAskMode::kSkip: what = "Skipping"; break;
-    case NArchive::NExtract::NAskMode::kReadExternal: what = "Reading"; break;
-    default: break;
-    }
-    (void)isFolder;
-    ctx.ui.set_current(what, u2s(name));
-    return ctx.check();
-}
-
-Z7_COM7F_IMF(ExtractCallback::MessageError(const wchar_t *message))
-{
-    std::lock_guard<std::mutex> lock(ctx.mt);
-    ctx.error(u2s(message));
-    return ctx.check();
-}
-
-Z7_COM7F_IMF(ExtractCallback::SetOperationResult(Int32 opRes, Int32 encrypted))
-{
-    if (opRes == NArchive::NExtract::NOperationResult::kOK) {
-        ctx.ui.file_done();
-    } else {
-        std::lock_guard<std::mutex> lock(ctx.mt);
-        std::string s = extract_error_text(opRes, encrypted);
-        if (!ctx.current.IsEmpty()) s += " : " + u2s(ctx.current);
-        ctx.error(s);
-    }
-    return ctx.check();
-}
-
-Z7_COM7F_IMF(ExtractCallback::ReportExtractResult(Int32 opRes, Int32 encrypted, const wchar_t *name))
-{
-    if (opRes != NArchive::NExtract::NOperationResult::kOK) {
-        ctx.current = name;
-        return SetOperationResult(opRes, encrypted);
-    }
-    return ctx.check();
-}
-
-Z7_COM7F_IMF(ExtractCallback::CryptoGetTextPassword(BSTR *password))
-{
-    std::lock_guard<std::mutex> lock(ctx.mt);
-    return ctx.get_password(password);
-}
-
-std::atomic<uint64_t> g_memory_limit{0};
-
-Z7_COM7F_IMF(ExtractCallback::RequestMemoryUse(UInt32 flags, UInt32, UInt32, const wchar_t *path, UInt64 requiredSize,
-                                               UInt64 *allowedSize, UInt32 *answerFlags))
-{
-    // Like 7-Zip FM: allow up to the limit from Options > Settings, and ask above it.
-    if ((flags & NRequestMemoryUseFlags::k_IsReport) == 0) {
-        const uint64_t limit = g_memory_limit;
-        if (limit && requiredSize > limit) {
-            std::lock_guard<std::mutex> lock(ctx.mt);
-            if (!ctx.ui.ask_memory(requiredSize, limit, path ? u2s(path) : ctx.archive)) {
-                *answerFlags = NRequestMemoryAnswerFlags::k_SkipArc;
-                ctx.error("The archive needs " + std::to_string(requiredSize >> 20) + " MB of memory to unpack; the limit is " +
-                          std::to_string(limit >> 20) + " MB (Tools > Options > Settings)");
-                return ctx.check();
+    // One segment of the progress line: " 45% 12 - dir/file.txt" or "  0M Scan".
+    void progress(const std::string &seg)
+    {
+        const std::string s = trim(seg);
+        if (s.empty()) return;
+        size_t i = 0;
+        while (i < s.size() && g_ascii_isdigit(s[i])) i++;
+        if (i == 0) return;
+        const unsigned pct = (unsigned)to_u64(s.substr(0, i));
+        const bool is_pct = i < s.size() && s[i] == '%';
+        auto words = split_ws(s.substr(i + (i < s.size() ? 1 : 0)));
+        size_t w = 0;
+        if (w < words.size() && g_ascii_isdigit(words[w][0])) {
+            const uint64_t f = to_u64(words[w++]);
+            while (files_seen < f) {
+                files_seen++;
+                ui.file_done();
             }
         }
-        *allowedSize = requiredSize;
-        *answerFlags = NRequestMemoryAnswerFlags::k_Allow;
-        return ctx.check();
-    }
-    std::lock_guard<std::mutex> lock(ctx.mt);
-    ctx.error("Not enough memory: the archive needs " + std::to_string(requiredSize >> 20) + " MB" +
-              (path ? " : " + u2s(path) : std::string()));
-    *answerFlags = NRequestMemoryAnswerFlags::k_SkipArc;
-    return ctx.check();
-}
-
-HRESULT ExtractCallback::BeforeOpen(const wchar_t *name, bool)
-{
-    ctx.archive = u2s(name);
-    ctx.ui.set_current("Opening", ctx.archive);
-    return ctx.check();
-}
-
-HRESULT ExtractCallback::OpenResult(const CCodecs *, const CArchiveLink &arcLink, const wchar_t *name, HRESULT result)
-{
-    if (result != S_OK) {
-        if (result == E_ABORT) return result;
-        ctx.error(open_error_text(arcLink, u2s(name), result));
-        return S_OK;
-    }
-    // Warnings about the archive itself (data after the end, unconfirmed start, ...).
-    for (unsigned i = 0; i < arcLink.Arcs.Size(); i++) {
-        const CArc &arc = arcLink.Arcs[i];
-        const CArcErrorInfo &er = arc.ErrorInfo;
-        if (er.ThereIsTail) ctx.warning("There are some data after the end of the payload data : " + u2s(arc.Path));
-        if (!er.WarningMessage.IsEmpty()) ctx.warning(u2s(er.WarningMessage) + " : " + u2s(arc.Path));
-        if (!er.ErrorMessage.IsEmpty()) ctx.error(u2s(er.ErrorMessage) + " : " + u2s(arc.Path));
-    }
-    return S_OK;
-}
-
-HRESULT ExtractCallback::ThereAreNoFiles() { return S_OK; }
-
-HRESULT ExtractCallback::ExtractResult(HRESULT result)
-{
-    if (result == S_OK || result == E_ABORT) return result;
-    ctx.error(hresult_text(result) + (ctx.archive.empty() ? "" : " : " + ctx.archive));
-    return S_OK;
-}
-
-HRESULT ExtractCallback::SetPassword(const UString &password)
-{
-    ctx.password_defined = true;
-    ctx.password = password;
-    return S_OK;
-}
-
-// ---------- Adding, updating, deleting ----------
-
-class UpdateCallback Z7_final : public IUpdateCallbackUI2 {
-public:
-    explicit UpdateCallback(Ctx &c) : ctx(c) {}
-    Z7_IFACE_IMP(IUpdateCallbackUI)
-    Z7_IFACE_IMP(IDirItemsCallback)
-    Z7_IFACE_IMP(IUpdateCallbackUI2)
-    Ctx &ctx;
-    bool ask_password = false;  // -p without a value: ask for a new password
-};
-
-HRESULT UpdateCallback::ScanError(const FString &path, DWORD systemError)
-{
-    std::lock_guard<std::mutex> lock(ctx.mt);
-    ctx.warning(f2s(path) + " : " + hresult_text(HRESULT_FROM_WIN32(systemError)));
-    return ctx.check();
-}
-HRESULT UpdateCallback::ScanProgress(const CDirItemsStat &, const FString &path, bool)
-{
-    ctx.ui.set_current("Scanning", f2s(path));
-    return ctx.check();
-}
-HRESULT UpdateCallback::OpenResult(const CCodecs *, const CArchiveLink &arcLink, const wchar_t *name, HRESULT result)
-{
-    if (result != S_OK && result != E_ABORT) ctx.error(open_error_text(arcLink, u2s(name), result));
-    return S_OK;
-}
-HRESULT UpdateCallback::StartScanning()
-{
-    ctx.ui.set_current("Scanning", "");
-    return ctx.check();
-}
-HRESULT UpdateCallback::FinishScanning(const CDirItemsStat &st)
-{
-    (void)st;  // scan errors were reported by ScanError
-    return ctx.check();
-}
-HRESULT UpdateCallback::StartOpenArchive(const wchar_t *name)
-{
-    ctx.archive = u2s(name);
-    ctx.ui.set_current("Opening", ctx.archive);
-    return ctx.check();
-}
-HRESULT UpdateCallback::StartArchive(const wchar_t *name, bool updating)
-{
-    if (name) ctx.archive = u2s(name);
-    ctx.ui.set_current(updating ? "Updating" : "Creating", ctx.archive);
-    return ctx.check();
-}
-HRESULT UpdateCallback::FinishArchive(const CFinishArchiveStat &st)
-{
-    ctx.res.packed = st.OutArcFileSize;
-    return S_OK;
-}
-HRESULT UpdateCallback::DeletingAfterArchiving(const FString &path, bool)
-{
-    ctx.ui.set_current("Deleting", f2s(path));
-    return ctx.check();
-}
-HRESULT UpdateCallback::FinishDeletingAfterArchiving() { return S_OK; }
-HRESULT UpdateCallback::MoveArc_Start(const wchar_t *, const wchar_t *dest, UInt64 size, Int32)
-{
-    ctx.ui.set_current("Moving", u2s(dest));
-    ctx.ui.set_total(size);
-    ctx.ui.set_completed(0);
-    return ctx.check();
-}
-HRESULT UpdateCallback::MoveArc_Progress(UInt64 total, UInt64 current)
-{
-    ctx.ui.set_total(total);
-    ctx.ui.set_completed(current);
-    return ctx.check();
-}
-HRESULT UpdateCallback::MoveArc_Finish() { return ctx.check(); }
-
-HRESULT UpdateCallback::WriteSfx(const wchar_t *name, UInt64)
-{
-    ctx.ui.set_current("Writing SFX module", u2s(name));
-    return ctx.check();
-}
-HRESULT UpdateCallback::SetTotal(UInt64 size)
-{
-    ctx.ui.set_total(size);
-    return ctx.check();
-}
-HRESULT UpdateCallback::SetCompleted(const UInt64 *value)
-{
-    if (value) ctx.ui.set_completed(*value);
-    return ctx.check();
-}
-HRESULT UpdateCallback::SetRatioInfo(const UInt64 *inSize, const UInt64 *outSize)
-{
-    if (inSize && outSize) ctx.ui.set_ratio(*inSize, *outSize);
-    return ctx.check();
-}
-HRESULT UpdateCallback::CheckBreak() { return ctx.check(); }
-HRESULT UpdateCallback::SetNumItems(const CArcToDoStat &stat)
-{
-    ctx.ui.set_num_files(stat.Get_NumDataItems_Total());
-    ctx.res.files = stat.NewData.NumFiles + stat.OldData.NumFiles;
-    ctx.res.folders = stat.NewData.NumDirs + stat.OldData.NumDirs;
-    ctx.res.size = stat.NewData.FilesSize + stat.OldData.FilesSize;
-    return ctx.check();
-}
-HRESULT UpdateCallback::GetStream(const wchar_t *name, bool isDir, bool, UInt32 mode)
-{
-    const char *what = "Adding";
-    if (mode == NUpdateNotifyOp::kUpdate) what = "Updating";
-    else if (mode == NUpdateNotifyOp::kAnalyze) what = "Analyzing";
-    else if (mode == NUpdateNotifyOp::kReplicate) what = "Replicating";
-    else if (mode == NUpdateNotifyOp::kRepack) what = "Repacking";
-    else if (mode == NUpdateNotifyOp::kSkip) what = "Skipping";
-    else if (mode == NUpdateNotifyOp::kDelete) what = "Deleting";
-    else if (mode == NUpdateNotifyOp::kHeader) what = "Writing headers";
-    ctx.current = name ? name : L"";
-    (void)isDir;
-    ctx.ui.set_current(what, u2s(name));
-    return ctx.check();
-}
-HRESULT UpdateCallback::OpenFileError(const FString &path, DWORD systemError)
-{
-    std::lock_guard<std::mutex> lock(ctx.mt);
-    ctx.warning("Cannot open file " + f2s(path) + " : " + hresult_text(HRESULT_FROM_WIN32(systemError)));
-    return ctx.check();
-}
-HRESULT UpdateCallback::ReadingFileError(const FString &path, DWORD systemError)
-{
-    std::lock_guard<std::mutex> lock(ctx.mt);
-    ctx.error("Cannot read file " + f2s(path) + " : " + hresult_text(HRESULT_FROM_WIN32(systemError)));
-    return ctx.check();
-}
-HRESULT UpdateCallback::SetOperationResult(Int32)
-{
-    ctx.ui.file_done();
-    return ctx.check();
-}
-HRESULT UpdateCallback::ReportExtractResult(Int32 opRes, Int32 isEncrypted, const wchar_t *name)
-{
-    if (opRes != NArchive::NExtract::NOperationResult::kOK) {
-        std::lock_guard<std::mutex> lock(ctx.mt);
-        ctx.error(std::string(extract_error_text(opRes, isEncrypted)) + " : " + u2s(name));
-    }
-    return ctx.check();
-}
-HRESULT UpdateCallback::ReportUpdateOperation(UInt32 op, const wchar_t *name, bool isDir)
-{
-    return GetStream(name, isDir, false, op);
-}
-HRESULT UpdateCallback::CryptoGetTextPassword2(Int32 *passwordIsDefined, BSTR *password)
-{
-    *password = nullptr;
-    if (!ctx.password_defined && ask_password) {
-        std::string pw;
-        if (!ctx.ui.ask_password(std::string(), pw)) return E_ABORT;
-        ctx.password = s2u(pw);
-        ctx.password_defined = true;
-    }
-    *passwordIsDefined = ctx.password_defined ? 1 : 0;
-    return StringToBstr(ctx.password, password);
-}
-HRESULT UpdateCallback::CryptoGetTextPassword(BSTR *password)
-{
-    // Asked when an encrypted archive is updated and its old items must be read.
-    return ctx.get_password(password);
-}
-HRESULT UpdateCallback::ShowDeleteFile(const wchar_t *name, bool)
-{
-    ctx.ui.set_current("Deleting", u2s(name));
-    return ctx.check();
-}
-
-// ---------- Hashing ----------
-
-class HashCallback Z7_final : public IHashCallbackUI {
-public:
-    explicit HashCallback(Ctx &c) : ctx(c) {}
-    Z7_IFACE_IMP(IDirItemsCallback)
-    Z7_IFACE_IMP(IHashCallbackUI)
-    Ctx &ctx;
-    UString name;
-};
-
-HRESULT HashCallback::ScanError(const FString &path, DWORD systemError)
-{
-    ctx.warning(f2s(path) + " : " + hresult_text(HRESULT_FROM_WIN32(systemError)));
-    return ctx.check();
-}
-HRESULT HashCallback::ScanProgress(const CDirItemsStat &, const FString &path, bool)
-{
-    ctx.ui.set_current("Scanning", f2s(path));
-    return ctx.check();
-}
-HRESULT HashCallback::StartScanning() { return ctx.check(); }
-HRESULT HashCallback::FinishScanning(const CDirItemsStat &) { return ctx.check(); }
-HRESULT HashCallback::SetNumFiles(UInt64 n)
-{
-    ctx.ui.set_num_files(n);
-    return ctx.check();
-}
-HRESULT HashCallback::SetTotal(UInt64 size)
-{
-    ctx.ui.set_total(size);
-    return ctx.check();
-}
-HRESULT HashCallback::SetCompleted(const UInt64 *v)
-{
-    if (v) ctx.ui.set_completed(*v);
-    return ctx.check();
-}
-HRESULT HashCallback::CheckBreak() { return ctx.check(); }
-HRESULT HashCallback::BeforeFirstFile(const CHashBundle &hb)
-{
-    ctx.res.hash.methods.clear();
-    FOR_VECTOR (i, hb.Hashers)
-        ctx.res.hash.methods.emplace_back(hb.Hashers[i].Name.Ptr());
-    return ctx.check();
-}
-HRESULT HashCallback::GetStream(const wchar_t *n, bool)
-{
-    name = n;
-    ctx.ui.set_current("Calculating", u2s(n));
-    return ctx.check();
-}
-HRESULT HashCallback::OpenFileError(const FString &path, DWORD systemError)
-{
-    ctx.error("Cannot open file " + f2s(path) + " : " + hresult_text(HRESULT_FROM_WIN32(systemError)));
-    return ctx.check();
-}
-HRESULT HashCallback::SetOperationResult(UInt64 fileSize, const CHashBundle &hb, bool showHash)
-{
-    HashLine line;
-    line.name = u2s(name);
-    line.size = fileSize;
-    line.dir = !showHash;
-    if (showHash) {
-        FOR_VECTOR (i, hb.Hashers) {
-            char s[k_HashCalc_DigestSize_Max * 2 + 64];
-            hb.Hashers[i].WriteToString(k_HashCalc_Index_Current, s);
-            line.digests.emplace_back(s);
+        if (is_pct) {
+            if (total) ui.set_completed(total * std::min(pct, 100u) / 100);
+            else ui.set_percent(std::min(pct, 100u));
+        }
+        if (w < words.size()) {
+            const std::string cmd = words[w++];
+            const char *what = cmd == "+" ? "Compressing" : cmd == "-" ? "Extracting" : cmd == "T" ? "Testing"
+                             : cmd == "U" ? "Updating" : cmd == "D" ? "Deleting" : cmd == "R" ? "Renaming"
+                             : cmd == "Scan" ? "Scanning" : cmd == "=" ? "Copying" : "Processing";
+            const auto pos = s.find(cmd, i);
+            std::string name = pos == std::string::npos ? "" : trim(s.substr(pos + cmd.size()));
+            ui.set_current(what, name);
         }
     }
-    ctx.res.hash.files.push_back(std::move(line));
-    ctx.ui.file_done();
-    return ctx.check();
-}
-HRESULT HashCallback::AfterLastFile(CHashBundle &hb)
-{
-    HashResult &h = ctx.res.hash;
-    h.num_files = hb.NumFiles;
-    h.num_dirs = hb.NumDirs;
-    h.total_size = hb.FilesSize;
-    h.errors = hb.NumErrors;
-    h.totals.clear();
-    FOR_VECTOR (i, hb.Hashers) {
-        char s[k_HashCalc_DigestSize_Max * 2 + 64];
-        hb.Hashers[i].WriteToString(k_HashCalc_Index_DataSum, s);
-        h.totals.emplace_back(s);
+
+    // Partial line at the end of standard output: 7-Zip waits for an answer.
+    // Returns the answer to write, or "" when it isn't a prompt.
+    std::string prompt(const std::string &tail)
+    {
+        if (tail.find("Enter password") != std::string::npos || tail.find("Verify password") != std::string::npos) {
+            if (!have_password) {
+                password_asked = true;
+                std::string pw;
+                if (!ui.ask_password(archive, pw)) {
+                    cancelled = true;
+                    return "\x03";  // stop the process
+                }
+                password = pw;
+                have_password = true;
+            }
+            return password + "\n";
+        }
+        if (tail.find("(Q)uit?") != std::string::npos) {
+            ow_section = 0;
+            switch (ui.ask_overwrite(ow_path[0], ow_size[0], ow_time[0], ow_path[1], ow_size[1], ow_time[1])) {
+            case Ui::Overwrite::Yes: return "y\n";
+            case Ui::Overwrite::YesAll: return "a\n";
+            case Ui::Overwrite::No: return "n\n";
+            case Ui::Overwrite::NoAll: return "s\n";
+            case Ui::Overwrite::Rename: return "u\n";
+            case Ui::Overwrite::Cancel:
+                cancelled = true;
+                return "q\n";
+            }
+        }
+        return {};
     }
-    return S_OK;
+
+    void run(const std::vector<std::string> &args)
+    {
+        if (g_prog.empty()) {
+            failed_to_start = true;
+            error("7-Zip was not found. Install your distribution's 7zip package (it provides 7z or 7zz).");
+            return;
+        }
+        std::vector<char *> argv;
+        argv.push_back(const_cast<char *>(g_prog.c_str()));
+        for (const auto &a : args) argv.push_back(const_cast<char *>(a.c_str()));
+        argv.push_back(nullptr);
+        gchar **env = g_get_environ();
+        env = g_environ_setenv(env, "LC_ALL", "C.UTF-8", TRUE);  // English messages, UTF-8 names
+        GPid pid = 0;
+        int in = -1, out = -1, err = -1;
+        GError *e = nullptr;
+        const bool ok = g_spawn_async_with_pipes(nullptr, argv.data(), env, G_SPAWN_DO_NOT_REAP_CHILD, nullptr, nullptr,
+                                                 &pid, &in, &out, &err, &e);
+        g_strfreev(env);
+        if (!ok) {
+            failed_to_start = true;
+            error(std::string("Cannot run ") + g_prog + ": " + (e ? e->message : "unknown error"));
+            if (e) g_error_free(e);
+            return;
+        }
+        fcntl(out, F_SETFL, O_NONBLOCK);
+        fcntl(err, F_SETFL, O_NONBLOCK);
+        std::string obuf, ebuf;
+        bool out_open = true, err_open = true;
+        bool sent_int = false;
+        auto int_time = std::chrono::steady_clock::now();
+        char buf[16384];
+        while (out_open || err_open) {
+            pollfd p[2];
+            int n = 0;
+            if (out_open) p[n++] = {out, POLLIN, 0};
+            if (err_open) p[n++] = {err, POLLIN, 0};
+            poll(p, (nfds_t)n, 100);
+            // stdout: lines, and prompts at the end of an unfinished line
+            while (out_open) {
+                const ssize_t r = read(out, buf, sizeof buf);
+                if (r > 0) {
+                    if (on_text) on_text(std::string(buf, (size_t)r));
+                    obuf.append(buf, (size_t)r);
+                    size_t nl;
+                    while ((nl = obuf.find('\n')) != std::string::npos) {
+                        line(obuf.substr(0, nl));
+                        obuf.erase(0, nl + 1);
+                    }
+                } else if (r == 0 || (errno != EAGAIN && errno != EINTR)) {
+                    out_open = false;
+                } else {
+                    break;
+                }
+            }
+            if (!obuf.empty() && in >= 0 && !sent_int) {
+                const std::string answer = prompt(obuf);
+                if (!answer.empty()) {
+                    line(obuf);
+                    obuf.clear();
+                    if (answer == "\x03") {
+                        kill(pid, SIGINT);
+                        sent_int = true;
+                        int_time = std::chrono::steady_clock::now();
+                    } else if (write(in, answer.data(), answer.size()) < 0) {
+                        kill(pid, SIGINT);
+                    }
+                }
+            }
+            // stderr: the progress line, redrawn with backspaces
+            while (err_open) {
+                const ssize_t r = read(err, buf, sizeof buf);
+                if (r > 0) {
+                    ebuf.append(buf, (size_t)r);
+                } else if (r == 0 || (errno != EAGAIN && errno != EINTR)) {
+                    err_open = false;
+                } else {
+                    break;
+                }
+            }
+            if (!ebuf.empty()) {
+                // Segments end at a backspace, CR or newline; the last one may still be incomplete.
+                size_t start = 0;
+                for (size_t k = 0; k < ebuf.size(); k++) {
+                    const char c = ebuf[k];
+                    if (c == '\b' || c == '\r' || c == '\n') {
+                        if (k > start) progress(ebuf.substr(start, k - start));
+                        start = k + 1;
+                    }
+                }
+                ebuf.erase(0, start);
+                if (!ebuf.empty() && ebuf.back() == ' ') {
+                    // complete enough; wait for the next backspace
+                }
+            }
+            // Pause stops the process; cancel interrupts it (7-Zip removes its temporary files).
+            if (ui.paused()) {
+                kill(pid, SIGSTOP);
+                const bool c = ui.cancelled();  // blocks while paused
+                kill(pid, SIGCONT);
+                if (c) cancelled = true;
+            } else if (ui.cancelled()) {
+                cancelled = true;
+            }
+            if (cancelled && !sent_int) {
+                kill(pid, SIGINT);
+                sent_int = true;
+                int_time = std::chrono::steady_clock::now();
+            } else if (sent_int && std::chrono::steady_clock::now() - int_time > std::chrono::seconds(5)) {
+                kill(pid, SIGKILL);
+            }
+        }
+        if (!obuf.empty()) line(obuf);
+        if (!pending_error.empty()) pending_is_warning ? warning(pending_error) : error(pending_error);
+        if (in >= 0) close(in);
+        close(out);
+        close(err);
+        int status = 0;
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+        }
+        g_spawn_close_pid(pid);
+        exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 255;
+        if (exit_code == 255) cancelled = true;
+    }
+};
+
+// Builds 7-Zip's argument list: the command, our output switches, then the caller's arguments.
+// A password switch "-pSECRET" is taken out; the password goes to 7-Zip's prompt instead.
+std::vector<std::string> build_args(const std::vector<std::string> &args, Proc &p)
+{
+    std::vector<std::string> out;
+    if (args.empty()) return out;
+    const std::string &cmd = args[0];
+    out.push_back(cmd);
+    for (const char *s : {"-bso1", "-bse1", "-bsp2", "-sccUTF-8", "-scsUTF-8"}) out.emplace_back(s);
+    bool after_dashes = false, archive_seen = false, wants_password = false;
+    bool has_memx = false;
+    for (size_t i = 1; i < args.size(); i++) {
+        const std::string &a = args[i];
+        if (!after_dashes && a == "--") {
+            after_dashes = true;
+            continue;
+        }
+        if (!after_dashes && a.size() >= 2 && a[0] == '-' && a[1] == 'p' && cmd != "b") {
+            wants_password = true;
+            if (a.size() > 2) {
+                p.password = a.substr(2);
+                p.have_password = true;
+            }
+            continue;
+        }
+        if (!after_dashes && starts_with(a, "-smemx")) has_memx = true;
+        if ((after_dashes || a.empty() || a[0] != '-') && !archive_seen) {
+            archive_seen = true;
+            p.archive = a;
+        }
+    }
+    // Creating an encrypted archive needs "-p" (7-Zip then asks); extracting asks when it has to.
+    if (wants_password && is_update_command(cmd)) out.emplace_back("-p");
+    if (!has_memx && g_memory_limit && is_extract_command(cmd) && cmd != "l")
+        out.push_back("-smemx" + std::to_string((g_memory_limit + (1ull << 30) - 1) >> 30) + "g");
+    for (size_t i = 1; i < args.size(); i++) {
+        const std::string &a = args[i];
+        if (a == "--") {
+            out.push_back(a);
+            out.insert(out.end(), args.begin() + (long)i + 1, args.end());
+            break;
+        }
+        if (a.size() >= 2 && a[0] == '-' && a[1] == 'p' && cmd != "b") continue;
+        out.push_back(a);
+    }
+    return out;
 }
 
-const char *const kPropNames[] = {
-    "0", "1", "2", "Path", "Name", "Extension", "Folder", "Size", "Packed Size", "Attributes", "Created", "Accessed",
-    "Modified", "Solid", "Commented", "Encrypted", "Split Before", "Split After", "Dictionary Size", "CRC", "Type",
-    "Anti", "Method", "Host OS", "File System", "User", "Group", "Block", "Comment", "Position", "Path Prefix",
-    "Folders", "Files", "Version", "Volume", "Multivolume", "Offset", "Links", "Blocks", "Volumes", "Time Type",
-    "64-bit", "Big-endian", "CPU", "Physical Size", "Headers Size", "Checksum", "Characteristics", "Virtual Address",
-    "ID", "Short Name", "Creator Application", "Sector Size", "Mode", "Symbolic Link", "Error", "Total Size",
-    "Free Space", "Cluster Size", "Label", "Local Name", "Provider", "NT Security", "Alternate Stream", "Aux",
-    "Deleted", "Tree", "SHA-1", "SHA-256", "Error Type", "Errors", "Errors", "Warnings", "Warning", "Streams",
-    "Alternate Streams", "Alternate Streams Size", "Virtual Size", "Unpack Size", "Total Physical Size",
-    "Volume Index", "SubType", "Short Comment", "Code Page", "Is not archive type", "Physical Size can't be detected",
-    "Zeros Tail Is Allowed", "Tail Size", "Embedded Stub Size", "Link", "Hard Link", "iNode", "Stream ID",
-    "Read-only", "Out Name", "Copy Link", "ArcFileName", "IsHash", "Metadata Changed", "User ID", "Group ID",
-    "Device Major", "Device Minor", "Dev Major", "Dev Minor"};
-
-std::string prop_name(PROPID id, const wchar_t *name)
+void finish(Result &r, const Proc &p)
 {
-    if (name && *name) return u2s(name);
-    if (id < sizeof(kPropNames) / sizeof(kPropNames[0])) return kPropNames[id];
-    return "Property " + std::to_string(id);
+    if (p.cancelled) {
+        r.cancelled = true;
+        r.ok = false;
+        r.summary = "Operation was cancelled";
+        return;
+    }
+    // 7-Zip's exit codes: 0 ok, 1 warning, 2 fatal error, 7 command line error, 8 not enough memory.
+    if (p.exit_code >= 2 && r.errors == 0) {
+        r.errors++;
+        const std::string m = p.exit_code == 7 ? "Command line error"
+                            : p.exit_code == 8 ? "Not enough memory"
+                                               : "7-Zip reported an error (exit code " + std::to_string(p.exit_code) + ")";
+        r.messages.push_back(m);
+    }
+    r.ok = r.errors == 0 && p.exit_code >= 0 && p.exit_code <= 1;
+    if (r.ok) r.summary = r.warnings ? "Finished with warnings" : "Everything is Ok";
+    else r.summary = "There are some errors";
+}
+
+// "Add new data to archive: 2 folders, 5 files, 1234 bytes (2 KiB)"
+void parse_counts(const std::string &s, uint64_t &folders, uint64_t &files, uint64_t &bytes)
+{
+    const auto w = split_ws(s);
+    for (size_t i = 1; i < w.size(); i++) {
+        const std::string unit = w[i];
+        if (!g_ascii_isdigit(w[i - 1][0])) continue;
+        const uint64_t v = to_u64(w[i - 1]);
+        if (starts_with(unit, "folder")) folders = v;
+        else if (starts_with(unit, "file")) files = v;
+        else if (starts_with(unit, "byte")) bytes = v;
+    }
+}
+
+// Totals at the end of the output.
+void parse_stats(Result &r, const std::vector<std::string> &lines)
+{
+    for (const auto &raw : lines) {
+        const std::string l = trim(raw);
+        auto value = [&](const char *key) { return to_u64(l.substr(strlen(key))); };
+        if (starts_with(l, "Folders: ")) r.folders = value("Folders: ");
+        else if (starts_with(l, "Files: ")) r.files = value("Files: ");
+        else if (starts_with(l, "Size: ")) r.size = value("Size: ");
+        else if (starts_with(l, "Compressed: ")) r.packed = value("Compressed: ");
+        else if (starts_with(l, "Files read from disk: ")) r.files = value("Files read from disk: ");
+        else if (starts_with(l, "Archive size: ")) r.packed = value("Archive size: ");
+        else if (starts_with(l, "Add new data to archive: ")) {
+            uint64_t fo = 0, fi = 0, by = 0;
+            parse_counts(l.substr(25), fo, fi, by);
+            r.folders = fo;
+            r.size = by;
+        }
+    }
+}
+
+// The table of "7z h": digest columns, size, name, between two lines of dashes.
+void parse_hash(Result &r, const std::vector<std::string> &lines)
+{
+    HashResult &h = r.hash;
+    size_t i = 0;
+    for (; i + 1 < lines.size(); i++)
+        if (starts_with(lines[i + 1], "--------") && lines[i + 1].find(' ') != std::string::npos &&
+            lines[i].find("Name") != std::string::npos)
+            break;
+    if (i + 1 >= lines.size()) return;
+    const std::string &dash = lines[i + 1];
+    std::vector<std::pair<size_t, size_t>> cols;  // [start, end)
+    for (size_t k = 0; k < dash.size();) {
+        if (dash[k] != '-') {
+            k++;
+            continue;
+        }
+        size_t e = k;
+        while (e < dash.size() && dash[e] == '-') e++;
+        cols.emplace_back(k, e);
+        k = e;
+    }
+    if (cols.size() < 3) return;
+    const size_t n_methods = cols.size() - 2;
+    h.methods.clear();
+    const auto head = split_ws(lines[i]);
+    for (size_t m = 0; m < n_methods && m < head.size(); m++) h.methods.push_back(head[m]);
+    auto col = [](const std::string &s, std::pair<size_t, size_t> c) {
+        return c.first < s.size() ? trim(s.substr(c.first, c.second - c.first)) : std::string();
+    };
+    for (size_t k = i + 2; k < lines.size() && !starts_with(lines[k], "--------"); k++) {
+        const std::string &l = lines[k];
+        if (trim(l).empty()) continue;
+        HashLine hl;
+        hl.name = cols.back().first < l.size() ? l.substr(cols.back().first) : "";
+        hl.size = to_u64(col(l, cols[n_methods]));
+        for (size_t m = 0; m < n_methods; m++) hl.digests.push_back(col(l, cols[m]));
+        hl.dir = std::all_of(hl.digests.begin(), hl.digests.end(), [](const std::string &d) { return d.empty(); }) &&
+                 !hl.name.empty() && hl.name.back() == '/';
+        if (hl.dir) {
+            hl.name.pop_back();
+            hl.digests.clear();
+        }
+        h.files.push_back(std::move(hl));
+    }
+    h.totals.assign(h.methods.size(), "");
+    for (const auto &raw : lines) {
+        const std::string l = trim(raw);
+        const auto pos = l.find(" for data:");
+        if (pos == std::string::npos) continue;
+        const std::string m = trim(l.substr(0, pos));
+        for (size_t k = 0; k < h.methods.size(); k++)
+            if (h.methods[k] == m) h.totals[k] = trim(l.substr(pos + 10));
+        if (starts_with(l, "Folders: ")) h.num_dirs = to_u64(l.substr(9));
+    }
+    for (const auto &raw : lines) {
+        const std::string l = trim(raw);
+        if (starts_with(l, "Folders: ")) h.num_dirs = to_u64(l.substr(9));
+        else if (starts_with(l, "Files: ")) h.num_files = to_u64(l.substr(7));
+        else if (starts_with(l, "Size: ")) h.total_size = to_u64(l.substr(6));
+    }
+    if (!h.num_files)
+        h.num_files = (uint64_t)std::count_if(h.files.begin(), h.files.end(), [](const HashLine &x) { return !x.dir; });
+    h.errors = r.errors;
+}
+
+// Moves everything inside `src` into `dst`, merging folders and asking before replacing files.
+// Returns false when the user cancelled.
+bool merge_move(const std::string &src, const std::string &dst, Ui &ui, Result &r, int &all)
+{
+    GDir *d = g_dir_open(src.c_str(), 0, nullptr);
+    if (!d) return true;
+    std::vector<std::string> names;
+    const char *n;
+    while ((n = g_dir_read_name(d))) names.emplace_back(n);
+    g_dir_close(d);
+    g_mkdir_with_parents(dst.c_str(), 0755);
+    for (const auto &name : names) {
+        const std::string s = std::string(src) + "/" + name, t = std::string(dst) + "/" + name;
+        GStatBuf ss, ts;
+        if (g_lstat(s.c_str(), &ss) != 0) continue;
+        const bool exists = g_lstat(t.c_str(), &ts) == 0;
+        if (exists && S_ISDIR(ss.st_mode) && S_ISDIR(ts.st_mode)) {
+            if (!merge_move(s, t, ui, r, all)) return false;
+            g_rmdir(s.c_str());
+            continue;
+        }
+        std::string target = t;
+        if (exists) {
+            int answer = all;
+            if (!answer) {
+                switch (ui.ask_overwrite(t, (uint64_t)ts.st_size, ts.st_mtime, s, (uint64_t)ss.st_size, ss.st_mtime)) {
+                case Ui::Overwrite::Yes: answer = 1; break;
+                case Ui::Overwrite::YesAll: answer = all = 1; break;
+                case Ui::Overwrite::No: answer = 2; break;
+                case Ui::Overwrite::NoAll: answer = all = 2; break;
+                case Ui::Overwrite::Rename: answer = 3; break;
+                case Ui::Overwrite::Cancel: return false;
+                }
+            }
+            if (answer == 2) continue;
+            if (answer == 3) {
+                const auto dot = name.rfind('.');
+                const std::string stem = dot == std::string::npos || dot == 0 ? name : name.substr(0, dot);
+                const std::string ext = dot == std::string::npos || dot == 0 ? "" : name.substr(dot);
+                for (int i = 1;; i++) {
+                    target = dst + "/" + stem + "_" + std::to_string(i) + ext;
+                    if (!g_file_test(target.c_str(), G_FILE_TEST_EXISTS)) break;
+                }
+            } else if (S_ISDIR(ts.st_mode)) {
+                r.errors++;
+                r.messages.push_back("Cannot replace the folder " + t + " with a file");
+                continue;
+            } else {
+                g_unlink(t.c_str());
+            }
+        }
+        if (g_rename(s.c_str(), target.c_str()) != 0) {
+            r.errors++;
+            r.messages.push_back("Cannot move " + s + " to " + target + ": " + g_strerror(errno));
+        }
+    }
+    return true;
+}
+
+void remove_tree(const std::string &p)
+{
+    GStatBuf st;
+    if (g_lstat(p.c_str(), &st) != 0) return;
+    if (S_ISDIR(st.st_mode)) {
+        if (GDir *d = g_dir_open(p.c_str(), 0, nullptr)) {
+            const char *n;
+            while ((n = g_dir_read_name(d))) remove_tree(p + "/" + n);
+            g_dir_close(d);
+        }
+        g_rmdir(p.c_str());
+    } else {
+        g_unlink(p.c_str());
+    }
+}
+
+// Runs a command; when 7-Zip stops at the memory limit, asks the UI and runs it again with the higher limit.
+Result run_with(const std::vector<std::string> &args, Ui &ui, uint64_t total,
+                const std::function<void(Proc &)> &setup = {})
+{
+    std::vector<std::string> a = args;
+    for (int attempt = 0;; attempt++) {
+        Result r;
+        Proc p(ui, r);
+        p.total = total;
+        if (setup) setup(p);
+        p.run(build_args(a, p));
+        if (p.mem_required && !p.cancelled && attempt == 0 &&
+            ui.ask_memory(p.mem_required, p.mem_allowed ? p.mem_allowed : g_memory_limit, p.archive)) {
+            std::vector<std::string> b{a[0], "-smemx" + std::to_string(p.mem_required >> 30) + "g"};
+            b.insert(b.end(), a.begin() + 1, a.end());
+            a = b;
+            continue;
+        }
+        if (p.mem_required && !p.cancelled)
+            p.error("The archive needs " + std::to_string(p.mem_required >> 30) +
+                    " GB of memory to unpack, more than the limit of " +
+                    std::to_string((p.mem_allowed ? p.mem_allowed : g_memory_limit) >> 30) + " GB");
+        parse_stats(r, p.lines);
+        if (!args.empty() && args[0] == "h") parse_hash(r, p.lines);
+        if (r.size && r.packed) ui.set_ratio(r.size, r.packed);
+        finish(r, p);
+        return r;
+    }
 }
 
 }  // namespace
 
-// ---------- public API ----------
-
 void set_memory_limit(uint64_t bytes) { g_memory_limit = bytes; }
 
-void init(const char *argv0)
+void init(const char *)
 {
-    if (g_codecs) return;
-    if (argv0) Set_ModuleDirPrefix_From_ProgArg0(argv0);
-    g_codecs = new CCodecs;
-    g_codecs_ref = g_codecs;
-    g_codecs->Load();
-    Codecs_AddHashArcHandler(g_codecs);
-}
-
-std::string version() { return MY_VERSION_NUMBERS; }
-
-std::vector<FormatInfo> formats()
-{
-    std::vector<FormatInfo> out;
-    if (!g_codecs) return out;
-    FOR_VECTOR (i, g_codecs->Formats) {
-        const CArcInfoEx &f = g_codecs->Formats[i];
-        FormatInfo fi;
-        fi.name = u2s(f.Name);
-        fi.can_update = f.UpdateEnabled;
-        FOR_VECTOR (k, f.Exts)
-            fi.extensions.push_back(u2s(f.Exts[k].Ext));
-        out.push_back(std::move(fi));
+    if (g_inited) return;
+    g_inited = true;
+    g_prog = find_program();
+    if (g_prog.empty()) return;
+    gchar *out = nullptr;
+    gchar **env = g_get_environ();
+    env = g_environ_setenv(env, "LC_ALL", "C.UTF-8", TRUE);
+    const char *argv[] = {g_prog.c_str(), "i", "-sccUTF-8", nullptr};
+    const bool ok = g_spawn_sync(nullptr, const_cast<char **>(argv), env, G_SPAWN_STDERR_TO_DEV_NULL, nullptr, nullptr,
+                                 &out, nullptr, nullptr, nullptr);
+    g_strfreev(env);
+    if (!ok || !out) return;
+    std::vector<std::string> lines;
+    {
+        gchar **ls = g_strsplit(out, "\n", -1);
+        for (gchar **l = ls; *l; l++) lines.emplace_back(*l);
+        g_strfreev(ls);
     }
-    return out;
+    g_free(out);
+    // "7-Zip 26.06 (x64) : Copyright ...", "7-Zip (a) 24.09 ..."
+    for (const auto &l : lines) {
+        if (!starts_with(l, "7-Zip")) continue;
+        for (const auto &w : split_ws(l))
+            if (g_ascii_isdigit(w[0]) && w.find('.') != std::string::npos) {
+                g_version = w;
+                break;
+            }
+        break;
+    }
+    enum { None, Formats, Hashers } sec = None;
+    for (const auto &raw : lines) {
+        const std::string l = trim(raw);
+        if (l == "Formats:") {
+            sec = Formats;
+            continue;
+        }
+        if (l == "Hashers:") {
+            sec = Hashers;
+            continue;
+        }
+        if (l.empty() || (l.back() == ':' && l.find(' ') == std::string::npos)) {
+            sec = l.empty() ? sec : None;
+            continue;
+        }
+        if (sec == Hashers) {
+            const auto w = split_ws(l);
+            if (w.size() >= 3 && std::find(g_hashers.begin(), g_hashers.end(), w.back()) == g_hashers.end())
+                g_hashers.push_back(w.back());
+        } else if (sec == Formats) {
+            // " 0 C...F..........c.a.m+.. w...0  7z       7z            7 z BC AF ' 1C"
+            // library index, flags (C = can create), optional time flags, name padded to 8, extensions padded
+            // to 13, signature.
+            size_t i = 0;
+            while (i < raw.size() && (raw[i] == ' ' || g_ascii_isdigit(raw[i]))) i++;
+            if (i >= raw.size()) continue;
+            FormatInfo f;
+            f.can_update = raw[i] == 'C';
+            size_t j = raw.find(' ', i);  // end of the flags
+            if (j == std::string::npos) continue;
+            size_t k = j;
+            while (k < raw.size() && raw[k] == ' ') k++;
+            // time flags: "w...0"
+            size_t e = raw.find(' ', k);
+            if (e != std::string::npos && e - k == 5 && std::strchr("w.", raw[k]) && g_ascii_isdigit(raw[k + 4])) {
+                k = e;
+                while (k < raw.size() && raw[k] == ' ') k++;
+            }
+            e = raw.find(' ', k);
+            f.name = raw.substr(k, e == std::string::npos ? std::string::npos : e - k);
+            if (e == std::string::npos) {
+                g_formats.push_back(f);
+                continue;
+            }
+            const size_t ext_start = k + std::max<size_t>(8, f.name.size()) + 1;
+            std::string exts = ext_start < raw.size() ? raw.substr(ext_start) : "";
+            // The field is 13 wide unless longer; the signature follows.
+            const auto words = split_ws(exts);
+            size_t used = 0;
+            for (const auto &w : words) {
+                const size_t at = exts.find(w, used);
+                const bool in_field = at < 13;
+                const bool ext_like = w.size() >= 2 && std::all_of(w.begin(), w.end(), [](char c) {
+                                          return g_ascii_islower(c) || g_ascii_isdigit(c) || c == '_';
+                                      });
+                if (!in_field && !ext_like) break;
+                if (!in_field && at > used + 1) break;  // a gap of two spaces ends the field
+                if (w.front() == '(') {
+                    used = at + w.size();
+                    continue;  // "tgz (tar)"
+                }
+                if (w.find('=') != std::string::npos) break;
+                f.extensions.push_back(w);
+                used = at + w.size();
+            }
+            g_formats.push_back(std::move(f));
+        }
+    }
 }
+
+bool available() { return !g_prog.empty(); }
+std::string program() { return g_prog; }
+std::string version() { return g_version; }
+std::vector<FormatInfo> formats() { return g_formats; }
+std::vector<std::string> hash_methods() { return g_hashers; }
 
 std::vector<std::string> update_formats()
 {
     // The Add to Archive dialog's list (7-Zip FM shows the formats that can create archives).
     static const char *const order[] = {"7z", "zip", "tar", "wim", "gzip", "bzip2", "xz", "zstd"};
     std::vector<std::string> out;
-    const auto all = formats();
     for (const char *n : order)
-        for (const auto &f : all)
+        for (const auto &f : g_formats)
             if (f.can_update && f.name == n) out.push_back(f.name);
-    return out;
-}
-
-std::vector<std::string> hash_methods()
-{
-    std::vector<std::string> out;
-    for (unsigned i = 0; i < g_NumHashers; i++) out.emplace_back(g_Hashers[i]->Name);
     return out;
 }
 
 bool looks_like_archive(const std::string &path)
 {
-    if (!g_codecs) return false;
     const auto slash = path.rfind('/');
     const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
     const auto dot = name.rfind('.');
     if (dot == std::string::npos || dot == 0) return false;
-    const UString ext = s2u(name.substr(dot + 1));
-    if (g_codecs->FindFormatForExtension(ext) >= 0) return true;
+    const std::string ext = g_ascii_strdown(name.substr(dot + 1).c_str(), -1);
+    for (const auto &f : g_formats)
+        for (const auto &e : f.extensions)
+            if (e == ext) return true;
     // Multi-volume archives: name.7z.001
-    if (ext.Len() == 3 && ext[0] >= L'0' && ext[0] <= L'9') return name.size() > 4;
+    if (ext.size() == 3 && g_ascii_isdigit(ext[0]) && g_ascii_isdigit(ext[1]) && g_ascii_isdigit(ext[2]))
+        return name.size() > 4;
     return false;
 }
 
@@ -705,437 +844,257 @@ ArchiveListing open_archive(const std::string &path, Ui &ui, const std::string &
 {
     ArchiveListing out;
     out.path = path;
-    Result dummy;
-    Ctx ctx(ui, dummy);
-    ctx.archive = path;
+    Result r;
+    Proc p(ui, r);
     if (!password.empty()) {
-        ctx.password_defined = true;
-        ctx.password = s2u(password);
+        p.password = password;
+        p.have_password = true;
     }
-    try {
-        CObjectVector<COpenType> types;
-        if (!type.empty() && !ParseOpenTypes(*g_codecs, s2u(type), types)) types.Clear();
-        CIntVector excluded;
-        CArchiveLink link;
-        COpenOptions op;
-        op.codecs = g_codecs;
-        op.types = &types;
-        op.excludedFormats = &excluded;
-        CObjectVector<CProperty> no_props;
-        op.props = &no_props;  // COpenOptions leaves it uninitialised
-        op.stdInMode = false;
-        op.filePath = s2u(path);
-        OpenCallback cb(ctx);
-        ui.set_current("Opening", path);
-        HRESULT res = link.Open3(op, &cb);
-        if (res != S_OK) {
-            out.cancelled = res == E_ABORT;
-            out.error = open_error_text(link, path, res);
-            return out;
-        }
-        const CArc &arc = link.Arcs.Back();
-        IInArchive *archive = arc.Archive;
-        if (arc.FormatIndex >= 0) {
-            const CArcInfoEx &f = g_codecs->Formats[(unsigned)arc.FormatIndex];
-            out.format = u2s(f.Name);
-            out.can_update = f.UpdateEnabled && link.Arcs.Size() == 1 && link.VolumePaths.Size() <= 1;
-        }
-        if (ctx.password_defined) out.password = u2s(ctx.password);
-
-        // Archive properties (Info dialog), for every level of nested archives.
-        for (unsigned level = 0; level < link.Arcs.Size(); level++) {
-            const CArc &a = link.Arcs[level];
-            if (link.Arcs.Size() > 1) out.props.emplace_back("--", u2s(a.Path));
-            if (a.FormatIndex >= 0) out.props.emplace_back("Type", u2s(g_codecs->Formats[(unsigned)a.FormatIndex].Name));
-            UInt32 n = 0;
-            a.Archive->GetNumberOfArchiveProperties(&n);
-            for (UInt32 i = 0; i < n; i++) {
-                CMyComBSTR name;
-                PROPID id;
-                VARTYPE vt;
-                if (a.Archive->GetArchivePropertyInfo(i, &name, &id, &vt) != S_OK) continue;
-                NCOM::CPropVariant prop;
-                if (a.Archive->GetArchiveProperty(id, &prop) != S_OK || prop.vt == VT_EMPTY) continue;
-                UString s;
-                ConvertPropertyToString2(s, prop, id);
-                if (!s.IsEmpty()) out.props.emplace_back(prop_name(id, name), u2s(s));
-            }
-            const CArcErrorInfo &er = a.ErrorInfo;
-            if (!er.WarningMessage.IsEmpty()) out.props.emplace_back("Warning", u2s(er.WarningMessage));
-            if (!er.ErrorMessage.IsEmpty()) out.props.emplace_back("Error", u2s(er.ErrorMessage));
-            if (er.ThereIsTail) out.props.emplace_back("Warning", "There are some data after the end of the payload data");
-        }
-
-        UInt32 num = 0;
-        if (archive->GetNumberOfItems(&num) != S_OK) throw CSystemException(E_FAIL);
-        out.entries.reserve(num);
-        CReadArcItem item;
-        for (UInt32 i = 0; i < num; i++) {
-            if ((i & 0xFFF) == 0 && ui.cancelled()) {
-                out.cancelled = true;
-                out.error = "Operation was cancelled";
-                return out;
-            }
-            if (arc.GetItem(i, item) != S_OK) continue;
-            Entry e;
-            e.index = i;
-            UString p = item.Path;
-            p.Replace(WCHAR_PATH_SEPARATOR, L'/');
-            e.path = u2s(p);
-            e.dir = item.IsDir;
-            {
-                NCOM::CPropVariant prop;
-                if (archive->GetProperty(i, kpidSize, &prop) == S_OK && prop.vt != VT_EMPTY)
-                    e.has_size = ConvertPropVariantToUInt64(prop, e.size);
-            }
-            {
-                NCOM::CPropVariant prop;
-                if (archive->GetProperty(i, kpidPackSize, &prop) == S_OK && prop.vt != VT_EMPTY)
-                    e.has_packed = ConvertPropVariantToUInt64(prop, e.packed);
-            }
-            auto get_time = [&](PROPID id, int64_t &t, bool &has) {
-                NCOM::CPropVariant prop;
-                if (archive->GetProperty(i, id, &prop) == S_OK && prop.vt == VT_FILETIME) {
-                    t = ft_to_unix(prop.filetime);
-                    has = true;
-                }
-            };
-            get_time(kpidMTime, e.mtime, e.has_mtime);
-            get_time(kpidCTime, e.ctime, e.has_ctime);
-            get_time(kpidATime, e.atime, e.has_atime);
-            {
-                NCOM::CPropVariant prop;
-                if (archive->GetProperty(i, kpidCRC, &prop) == S_OK && prop.vt == VT_UI4) {
-                    e.crc = prop.ulVal;
-                    e.has_crc = true;
-                }
-            }
-            {
-                NCOM::CPropVariant prop;
-                if (archive->GetProperty(i, kpidEncrypted, &prop) == S_OK && prop.vt == VT_BOOL) e.encrypted = VARIANT_BOOLToBool(prop.boolVal);
-            }
-            auto get_str = [&](PROPID id, std::string &s) {
-                NCOM::CPropVariant prop;
-                if (archive->GetProperty(i, id, &prop) == S_OK && prop.vt != VT_EMPTY) {
-                    UString u;
-                    ConvertPropertyToString2(u, prop, id);
-                    s = u2s(u);
-                }
-            };
-            get_str(kpidAttrib, e.attrib);
-            get_str(kpidMethod, e.method);
-            get_str(kpidComment, e.comment);
-            get_str(kpidUser, e.user);
-            get_str(kpidGroup, e.group);
-            get_str(kpidSymLink, e.link);
-            out.entries.push_back(std::move(e));
-        }
-        out.ok = true;
-    } catch (const CSystemException &e) {
-        out.error = hresult_text(e.ErrorCode);
-    } catch (const UString &s) {
-        out.error = u2s(s);
-    } catch (const char *s) {
-        out.error = s;
-    } catch (const CNewException &) {
-        out.error = "Can't allocate required memory";
-    } catch (...) {
-        out.error = "Unknown error";
+    std::vector<std::string> args{"l", "-slt"};
+    if (!type.empty()) args.push_back("-t" + type);
+    args.push_back("--");
+    args.push_back(path);
+    ui.set_current("Opening", path);
+    p.run(build_args(args, p));
+    if (p.cancelled) {
+        out.cancelled = true;
+        out.error = "Operation was cancelled";
+        return out;
     }
+
+    // Archive blocks ("--" then "Key = value" lines) before "----------", then one block per item.
+    std::vector<std::vector<std::pair<std::string, std::string>>> levels;
+    bool in_items = false;
+    Entry cur;
+    bool have_cur = false;
+    uint32_t index = 0;
+    auto flush = [&] {
+        if (!have_cur) return;
+        cur.index = index++;
+        out.entries.push_back(std::move(cur));
+        cur = Entry();
+        have_cur = false;
+    };
+    for (const auto &raw : p.lines) {
+        if (raw == "--" && !in_items) {
+            levels.emplace_back();
+            continue;
+        }
+        if (raw == "----------") {
+            in_items = true;
+            continue;
+        }
+        const auto eq = raw.find(" = ");
+        const bool kv = eq != std::string::npos && eq > 0 && raw[0] != ' ';
+        std::string key = kv ? raw.substr(0, eq) : "", val = kv ? raw.substr(eq + 3) : "";
+        if (!kv && !raw.empty() && raw.back() == '=' && raw.size() > 2 && raw[raw.size() - 2] == ' ') {
+            key = raw.substr(0, raw.size() - 2);  // "Key =" with an empty value
+            val.clear();
+        }
+        if (!in_items) {
+            if (!key.empty() && !levels.empty()) levels.back().emplace_back(key, val);
+            continue;
+        }
+        if (key.empty()) {
+            if (raw.empty()) flush();
+            continue;
+        }
+        if (key == "Path") {
+            flush();
+            cur.path = val;
+            have_cur = true;
+            continue;
+        }
+        if (!have_cur) continue;
+        if (key == "Folder") cur.dir = val == "+";
+        else if (key == "Size" && !val.empty()) {
+            cur.size = to_u64(val);
+            cur.has_size = true;
+        } else if (key == "Packed Size" && !val.empty()) {
+            cur.packed = to_u64(val);
+            cur.has_packed = true;
+        } else if (key == "Modified") cur.has_mtime = parse_time(val, cur.mtime);
+        else if (key == "Created") cur.has_ctime = parse_time(val, cur.ctime);
+        else if (key == "Accessed") cur.has_atime = parse_time(val, cur.atime);
+        else if (key == "CRC" && !val.empty()) {
+            cur.crc = (uint32_t)g_ascii_strtoull(val.c_str(), nullptr, 16);
+            cur.has_crc = true;
+        } else if (key == "Encrypted") cur.encrypted = val == "+";
+        else if (key == "Attributes") {
+            cur.attrib = val;
+            if (!val.empty() && val[0] == 'D') cur.dir = true;
+        } else if (key == "Mode") {
+            if (cur.attrib.empty()) cur.attrib = val;
+            if (!val.empty() && val[0] == 'd') cur.dir = true;
+        } else if (key == "Method") cur.method = val;
+        else if (key == "Comment") cur.comment = val;
+        else if (key == "User") cur.user = val;
+        else if (key == "Group") cur.group = val;
+        else if (key == "Symbolic Link" && !val.empty()) cur.link = val;
+        else if (key == "Hard Link" && !val.empty() && cur.link.empty()) cur.link = val;
+    }
+    flush();
+    // "./dir/file" (tar made with "tar -C dir .") and "dir/" to "dir/file" and "dir"; drop the "." item itself.
+    for (auto &e : out.entries) {
+        while (starts_with(e.path, "./")) e.path.erase(0, 2);
+        for (size_t k; (k = e.path.find("/./")) != std::string::npos;) e.path.erase(k, 2);
+        while (!e.path.empty() && e.path.back() == '/') {
+            e.path.pop_back();
+            e.dir = true;
+        }
+    }
+    out.entries.erase(std::remove_if(out.entries.begin(), out.entries.end(),
+                                     [](const Entry &e) { return e.path.empty() || e.path == "."; }),
+                      out.entries.end());
+
+    if (levels.empty() || !in_items) {
+        if (p.password_asked || (p.have_password && !password.empty()))
+            for (const auto &m : r.messages)
+                if (m.find("Wrong password") != std::string::npos) {
+                    out.error = "Cannot open encrypted archive '" + path + "'. Wrong password?";
+                    return out;
+                }
+        std::string msg;
+        for (const auto &m : r.messages)
+            if (m.find("Cannot open the file as") != std::string::npos || m == "Is not archive") {
+                msg = "Cannot open the file '" + path + "' as archive";
+                break;
+            }
+        if (msg.empty() && !r.messages.empty()) msg = r.messages.front();
+        if (msg.empty()) msg = "Cannot open '" + path + "'";
+        out.error = msg;
+        return out;
+    }
+
+    for (size_t lv = 0; lv < levels.size(); lv++) {
+        std::string lpath;
+        for (const auto &kv : levels[lv])
+            if (kv.first == "Path") lpath = kv.second;
+        if (levels.size() > 1) out.props.emplace_back("--", lpath);
+        for (const auto &kv : levels[lv])
+            if (kv.first != "Path" && !kv.second.empty()) out.props.emplace_back(kv.first, kv.second);
+    }
+    for (const auto &kv : levels.back())
+        if (kv.first == "Type") out.format = kv.second;
+    uint64_t volumes = 0;
+    for (const auto &kv : levels.back())
+        if (kv.first == "Volumes") volumes = to_u64(kv.second);
+    for (const auto &f : g_formats)
+        if (f.name == out.format) out.can_update = f.can_update && levels.size() == 1 && volumes <= 1;
+    for (const auto &m : r.messages) out.props.emplace_back("Warning", m);
+    if (p.have_password) out.password = p.password;
+    out.ok = true;
     return out;
-}
-
-static void finish(Result &r, HRESULT hr)
-{
-    if (hr == E_ABORT) {
-        r.cancelled = true;
-        r.ok = false;
-        r.summary = "Operation was cancelled";
-        return;
-    }
-    if (hr != S_OK && hr != S_FALSE) {
-        r.errors++;
-        r.messages.push_back(hresult_text(hr));
-    }
-    r.ok = r.errors == 0;
-    if (r.ok)
-        r.summary = r.warnings ? "Finished with warnings" : "Everything is Ok";
-    else
-        r.summary = "There are some errors";
 }
 
 Result run(const std::vector<std::string> &args, Ui &ui)
 {
-    Result r;
-    Ctx ctx(ui, r);
-    try {
-        UStringVector cmd;
-        for (const auto &a : args) cmd.Add(s2u(a));
-        CArcCmdLineOptions options;
-        CArcCmdLineParser parser;
-        parser.Parse1(cmd, options);
-        parser.Parse2(options);
-
-        CObjectVector<COpenType> types;
-        if (!ParseOpenTypes(*g_codecs, options.ArcType, types)) throw UString(L"Unsupported archive type");
-        CIntVector excluded;
-        FOR_VECTOR (k, options.ExcludedArcTypes) {
-            CIntVector idx;
-            if (!g_codecs->FindFormatForArchiveType(options.ExcludedArcTypes[k], idx) || idx.Size() != 1)
-                throw UString(L"Unsupported archive type");
-            excluded.AddToUniqueSorted(idx[0]);
-        }
-
-        ctx.password_defined = options.PasswordEnabled && !options.Password.IsEmpty();
-        ctx.password = options.Password;
-
-        HRESULT hr = S_OK;
-        const auto type = options.Command.CommandType;
-        if (options.Command.IsFromExtractGroup()) {
-            UStringVector paths, pathsFull;
-            CDirItemsStat st;
-            hr = EnumerateDirItemsAndSort(options.arcCensor, NWildcard::k_RelatPath, UString(), paths, pathsFull, st, nullptr);
-            if (hr == S_OK) {
-                ExtractCallback *ecs = new ExtractCallback(ctx);
-                CMyComPtr<IFolderArchiveExtractCallback> ref(ecs);
-                ecs->test = options.Command.IsTestCommand();
-                CExtractOptions eo;
-                (CExtractOptionsBase &)eo = options.ExtractOptions;
-                eo.YesToAll = options.YesToAll;
-                eo.TestMode = options.Command.IsTestCommand();
-                eo.Properties = options.Properties;
-                UString err;
-                CDecompressStat stat;
-                stat.Clear();
-                hr = Extract(g_codecs, types, excluded, paths, pathsFull, options.Censor.Pairs.Front().Head, eo, ecs, ecs,
-                             ecs, nullptr, err, stat);
-                if (!err.IsEmpty()) ctx.error(u2s(err));
-                r.files = stat.NumFiles;
-                r.folders = stat.NumFolders;
-                r.size = stat.UnpackSize;
-                r.packed = stat.PackSize;
-                if (paths.IsEmpty()) ctx.error("Cannot find archive");
-            }
-        } else if (options.Command.IsFromUpdateGroup()) {
-            CUpdateOptions &uo = options.UpdateOptions;
-            OpenCallback ocb(ctx);
-            UpdateCallback ucb(ctx);
-            ucb.ask_password = options.PasswordEnabled && options.Password.IsEmpty();
-            CUpdateErrorInfo ei;
-            ctx.archive = u2s(options.ArchiveName);
-            hr = UpdateArchive(g_codecs, types, options.ArchiveName, options.Censor, uo, ei, &ocb, &ucb, true);
-            if (ei.ThereIsError()) {
-                std::string s(ei.Message.Ptr(), ei.Message.Len());
-                FOR_VECTOR (i, ei.FileNames) s += "\n" + f2s(ei.FileNames[i]);
-                if (ei.SystemError) s += "\n" + hresult_text(HRESULT_FROM_WIN32(ei.SystemError));
-                ctx.error(s);
-                if (hr == S_OK) hr = E_FAIL;
-                else if (hr != E_ABORT) hr = S_OK;  // already reported
-            }
-        } else if (type == NCommandType::kHash) {
-            HashCallback hcb(ctx);
-            AString err;
-            hr = HashCalc(EXTERNAL_CODECS_LOC_VARS options.Censor, options.HashOptions, err, &hcb);
-            if (!err.IsEmpty()) ctx.error(std::string(err.Ptr(), err.Len()));
-            r.files = r.hash.num_files;
-            r.folders = r.hash.num_dirs;
-            r.size = r.hash.total_size;
-        } else {
-            throw UString(L"This command is not supported by the GUI");
-        }
-        finish(r, hr);
-    } catch (const CArcCmdLineException &e) {
-        ctx.error("Command Line Error: " + u2s(e));
-        finish(r, S_OK);
-    } catch (const CSystemException &e) {
-        finish(r, e.ErrorCode);
-    } catch (const UString &s) {
-        ctx.error(u2s(s));
-        finish(r, S_OK);
-    } catch (const AString &s) {
-        ctx.error(std::string(s.Ptr(), s.Len()));
-        finish(r, S_OK);
-    } catch (const char *s) {
-        ctx.error(s);
-        finish(r, S_OK);
-    } catch (const CNewException &) {
-        finish(r, E_OUTOFMEMORY);
-    } catch (...) {
-        ctx.error("Unknown error");
-        finish(r, S_OK);
+    if (args.empty()) {
+        Result r;
+        r.errors = 1;
+        r.messages.push_back("No command");
+        r.summary = "There are some errors";
+        return r;
     }
-    return r;
+    // For "a" and "u", 7-Zip prints the input size after scanning; use it as the total.
+    return run_with(args, ui, 0, [&ui](Proc &p) {
+        p.on_line = [&ui, &p](const std::string &l) {
+            if (starts_with(l, "Add new data to archive: ")) {
+                uint64_t fo = 0, fi = 0, by = 0;
+                parse_counts(l.substr(25), fo, fi, by);
+                p.total = by;
+                ui.set_total(by);
+                ui.set_num_files(fi);
+            }
+        };
+    });
 }
 
 Result extract_items(const ExtractRequest &req, Ui &ui)
 {
-    Result r;
-    Ctx ctx(ui, r);
-    ctx.archive = req.archive;
-    if (!req.password.empty()) {
-        ctx.password_defined = true;
-        ctx.password = s2u(req.password);
-    }
-    HRESULT hr = S_OK;
-    try {
-        ExtractCallback *ecs = new ExtractCallback(ctx);
-        CMyComPtr<IFolderArchiveExtractCallback> ref(ecs);
-        ecs->test = req.test;
-
-        CObjectVector<COpenType> types;
-        CIntVector excluded;
-        CArchiveLink link;
-        COpenOptions op;
-        op.codecs = g_codecs;
-        op.types = &types;
-        op.excludedFormats = &excluded;
-        CObjectVector<CProperty> no_props;
-        op.props = &no_props;  // COpenOptions leaves it uninitialised
-        op.filePath = s2u(req.archive);
-        ui.set_current("Opening", req.archive);
-        hr = link.Open3(op, ecs);
-        if (hr != S_OK) {
-            if (hr != E_ABORT) ctx.error(open_error_text(link, req.archive, hr));
-            finish(r, hr == E_ABORT ? hr : S_OK);
+    const std::string cmd = req.test ? "t" : req.path_mode == 1 ? "e" : "x";
+    // 7-Zip can't remove a path prefix, so items from inside a folder of the archive are extracted to a
+    // staging folder next to the destination and moved out of it.
+    const bool staging = !req.test && req.path_mode == 0 && !req.strip_prefix.empty();
+    std::string out_dir = req.out_dir;
+    if (staging) {
+        g_mkdir_with_parents(req.out_dir.c_str(), 0755);
+        std::string tmpl = req.out_dir + "/.7zipl-XXXXXX";
+        std::vector<char> b(tmpl.begin(), tmpl.end());
+        b.push_back('\0');
+        if (!g_mkdtemp(b.data())) {
+            Result r;
+            r.errors = 1;
+            r.messages.push_back("Cannot create a folder in " + req.out_dir + ": " + g_strerror(errno));
+            r.summary = "There are some errors";
             return r;
         }
-        const CArc &arc = link.Arcs.Back();
-        IInArchive *archive = arc.Archive;
-
-        // Indices of the selected items and everything below them.
-        CRecordVector<UInt32> indices;
-        UInt32 num = 0;
-        archive->GetNumberOfItems(&num);
-        std::vector<UString> want;
-        for (const auto &s : req.items) want.push_back(s2u(s));
-        CReadArcItem item;
-        for (UInt32 i = 0; i < num; i++) {
-            if (want.empty()) {
-                indices.Add(i);
-                continue;
-            }
-            if (arc.GetItem(i, item) != S_OK) continue;
-            UString p = item.Path;
-            p.Replace(WCHAR_PATH_SEPARATOR, L'/');
-            for (const UString &w : want) {
-                if (CompareFileNames(p, w) == 0 ||
-                    (p.Len() > w.Len() && p[w.Len()] == L'/' && CompareFileNames(p.Left(w.Len()), w) == 0)) {
-                    indices.Add(i);
-                    break;
-                }
-            }
-        }
-        if (indices.IsEmpty()) {
-            finish(r, S_OK);
-            return r;
-        }
-
-        UStringVector remove;
-        if (!req.strip_prefix.empty()) SplitPathToParts(s2u(req.strip_prefix), remove);
-        while (!remove.IsEmpty() && remove.Back().IsEmpty()) remove.DeleteBack();
-
-        CArchiveExtractCallback *aec = new CArchiveExtractCallback;
-        CMyComPtr<IArchiveExtractCallback> aecRef(aec);
-        NExtract::NPathMode::EEnum pm = NExtract::NPathMode::kFullPaths;
-        if (req.path_mode == 1) pm = NExtract::NPathMode::kNoPaths;
-        else if (req.path_mode == 2) pm = NExtract::NPathMode::kAbsPaths;
-        NExtract::NOverwriteMode::EEnum om = NExtract::NOverwriteMode::kAsk;
-        switch (req.overwrite) {
-        case 1: om = NExtract::NOverwriteMode::kOverwrite; break;
-        case 2: om = NExtract::NOverwriteMode::kSkip; break;
-        case 3: om = NExtract::NOverwriteMode::kRename; break;
-        case 4: om = NExtract::NOverwriteMode::kRenameExisting; break;
-        default: break;
-        }
-        aec->InitForMulti(false, pm, om, NExtract::NZoneIdMode::kNone, false);
-
-        FString outDir;
-        if (!req.test) {
-            outDir = us2fs(s2u(req.out_dir));
-            NFile::NName::NormalizeDirPathPrefix(outDir);
-            if (!NFile::NDir::CreateComplexDir(outDir)) {
-                ctx.error("Cannot create output directory " + req.out_dir);
-                finish(r, S_OK);
-                return r;
-            }
-        }
-        CExtractNtOptions nt;
-        nt.HardLinks.Val = true;
-        nt.SymLinks.Val = true;
-        UInt64 packSize = 0;
-        {
-            NCOM::CPropVariant prop;
-            if (archive->GetArchiveProperty(kpidPhySize, &prop) == S_OK) ConvertPropVariantToUInt64(prop, packSize);
-        }
-        aec->Init(nt, nullptr, &arc, ecs, false, req.test, outDir, remove, false, packSize);
-        if (!req.test) aec->PrepareHardLinks(&indices);
-
-        {
-            CArchiveExtractCallback_Closer closer(aec);
-            const UInt64 zero = 0;
-            IArchiveExtractCallback *iaec = aec;
-            iaec->SetCompleted(&zero);
-            hr = archive->Extract(indices.ConstData(), indices.Size(), req.test ? 1 : 0, iaec);
-            const HRESULT hr2 = closer.Close();
-            if (hr == S_OK) hr = hr2;
-        }
-        if (hr != S_OK && hr != E_ABORT) {
-            ctx.error(hresult_text(hr));
-            hr = S_OK;
-        }
-    } catch (const CSystemException &e) {
-        hr = e.ErrorCode;
-    } catch (const UString &s) {
-        ctx.error(u2s(s));
-    } catch (const char *s) {
-        ctx.error(s);
-    } catch (const CNewException &) {
-        hr = E_OUTOFMEMORY;
-    } catch (...) {
-        ctx.error("Unknown error");
+        out_dir = b.data();
     }
-    finish(r, hr);
+    std::vector<std::string> args{cmd, "-spd"};
+    if (!req.test) {
+        args.push_back("-o" + out_dir);
+        if (staging) args.emplace_back("-aoa");
+        else if (req.overwrite == 1) args.emplace_back("-aoa");
+        else if (req.overwrite == 2) args.emplace_back("-aos");
+        else if (req.overwrite == 3) args.emplace_back("-aou");
+        else if (req.overwrite == 4) args.emplace_back("-aot");
+        if (req.path_mode == 2) args.emplace_back("-spf");
+    }
+    if (!req.password.empty()) args.push_back("-p" + req.password);
+    // Many items go through a list file (the command line has a length limit).
+    std::string list_file;
+    size_t len = 0;
+    for (const auto &i : req.items) len += i.size() + 1;
+    if (req.items.size() > 200 || len > 60000) {
+        gchar *name = nullptr;
+        const int fd = g_file_open_tmp("7zipl-list-XXXXXX", &name, nullptr);
+        if (fd >= 0) {
+            std::string data;
+            for (const auto &i : req.items) data += i + "\n";
+            if (write(fd, data.data(), data.size()) < 0) {
+            }
+            close(fd);
+            list_file = name;
+        }
+        g_free(name);
+    }
+    args.emplace_back("--");
+    args.push_back(req.archive);
+    if (!list_file.empty()) args.push_back("@" + list_file);
+    else args.insert(args.end(), req.items.begin(), req.items.end());
+    Result r = run_with(args, ui, 0);
+    if (!list_file.empty()) g_unlink(list_file.c_str());
+    if (staging) {
+        if (!r.cancelled) {
+            int all = req.overwrite == 1 ? 1 : req.overwrite == 2 ? 2 : 0;
+            const std::string from = out_dir + "/" + req.strip_prefix;
+            if (!merge_move(g_file_test(from.c_str(), G_FILE_TEST_IS_DIR) ? from : out_dir, req.out_dir, ui, r, all)) {
+                r.cancelled = true;
+                r.ok = false;
+                r.summary = "Operation was cancelled";
+            } else if (r.errors && r.ok) {
+                r.ok = false;
+                r.summary = "There are some errors";
+            }
+        }
+        remove_tree(out_dir);
+    }
     return r;
 }
-
-namespace {
-class BenchPrint final : public IBenchPrintCallback {
-public:
-    BenchPrint(Ui &u, const std::function<void(const std::string &)> &p) : ui(u), print(p) {}
-    void Print(const char *s) override { print(s); }
-    void NewLine() override { print("\n"); }
-    HRESULT CheckBreak() override { return ui.cancelled() ? E_ABORT : S_OK; }
-    Ui &ui;
-    const std::function<void(const std::string &)> &print;
-};
-}  // namespace
 
 Result benchmark(unsigned threads, unsigned dict_log, unsigned passes, Ui &ui,
                  const std::function<void(const std::string &)> &print)
 {
+    std::vector<std::string> args{"b"};
+    if (passes) args.push_back(std::to_string(passes));
+    if (threads) args.push_back("-mmt" + std::to_string(threads));
+    if (dict_log) args.push_back("-md" + std::to_string(dict_log));
     Result r;
-    try {
-        CObjectVector<CProperty> props;
-        if (threads) {
-            CProperty p;
-            p.Name = L"mt";
-            p.Value.Add_UInt32(threads);
-            props.Add(p);
-        }
-        if (dict_log) {
-            CProperty p;
-            p.Name = L"d";
-            p.Value.Add_UInt32(dict_log);
-            props.Add(p);
-        }
-        BenchPrint cb(ui, print);
-        const HRESULT hr = Bench(EXTERNAL_CODECS_LOC_VARS & cb, nullptr, props, passes ? passes : 1, true);
-        finish(r, hr);
-    } catch (...) {
-        r.errors++;
-        r.messages.push_back("Benchmark error");
-        finish(r, S_OK);
-    }
+    Proc p(ui, r);
+    p.on_text = print;
+    p.run(build_args(args, p));
+    finish(r, p);
     return r;
 }
 

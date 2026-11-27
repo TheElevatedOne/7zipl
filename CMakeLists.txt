@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(7zipl VERSION 0.1.0 LANGUAGES C CXX)
 
-# 7zipl: 7-Zip with a native GTK 4 front-end for Linux. The 7-Zip engine (C/, CPP/) is upstream
-# 7-Zip unchanged; the GUI lives in gtk/.
+# 7zipl: a native GTK 4 front-end for 7-Zip on Linux. It runs the system's 7-Zip (7zz or 7z from the
+# distribution's 7zip package); the GUI lives in gtk/.
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,26 +18,8 @@ pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4>=4.14)
 
 set(SZL_APP_ID "org.sevenzipl.SevenZipL")
 
-# ---- 7-Zip engine: the 7zz bundle (CPP/7zip/Bundles/Alone2) without its console front-end ----
-include(cmake/sevenzip-sources.cmake)
-# An OBJECT library: the codecs and archive handlers register themselves from static constructors that
-# nothing references, so a static archive would let the linker drop them.
-add_library(sevenzip OBJECT ${SEVENZIP_BACKEND_SOURCES})
-target_compile_definitions(sevenzip PUBLIC _REENTRANT _FILE_OFFSET_BITS=64 _LARGEFILE_SOURCE
-  $<$<NOT:$<CONFIG:Debug>>:NDEBUG>)
-# Upstream builds with -Wall -Wextra -Werror; warnings from newer compilers must not break the build here.
-target_compile_options(sevenzip PRIVATE -w)
-set_target_properties(sevenzip PROPERTIES POSITION_INDEPENDENT_CODE ON CXX_STANDARD 17)
-target_include_directories(sevenzip PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(sevenzip PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
-
 # ---- GUI ----
 set(SZL_WARN -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
-
-# The glue between the GUI and the engine; the only code that includes 7-Zip's headers.
-add_library(szlengine OBJECT gtk/src/engine.cpp)
-target_compile_options(szlengine PRIVATE -Wno-unused-parameter)
-target_link_libraries(szlengine PUBLIC sevenzip)
 
 # The app icon, also built into the binary (window icon before installing, and the per-user desktop entry).
 find_program(GLIB_COMPILE_RESOURCES glib-compile-resources REQUIRED)
@@ -51,6 +33,7 @@ add_custom_command(
 add_executable(7zipl
   ${SZL_RESOURCES}
   gtk/src/main.cpp
+  gtk/src/engine.cpp
   gtk/src/app.cpp
   gtk/src/gtkutil.cpp
   gtk/src/style.cpp
@@ -75,7 +58,7 @@ target_compile_definitions(7zipl PRIVATE
   GDK_DISABLE_DEPRECATION_WARNINGS)
 target_compile_options(7zipl PRIVATE ${SZL_WARN})
 pkg_check_modules(GIO_UNIX REQUIRED IMPORTED_TARGET gio-unix-2.0)
-target_link_libraries(7zipl PRIVATE sevenzip szlengine PkgConfig::GTK4 PkgConfig::GIO_UNIX)
+target_link_libraries(7zipl PRIVATE Threads::Threads PkgConfig::GTK4 PkgConfig::GIO_UNIX)
 
 install(TARGETS 7zipl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
@@ -97,7 +80,7 @@ install(CODE [[
     endif()
   endif()
 ]])
-install(FILES README.md DOC/License.txt DOC/unRarLicense.txt DESTINATION ${CMAKE_INSTALL_DOCDIR})
+install(FILES README.md COPYING DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
 enable_testing()
 add_test(NAME selftest COMMAND 7zipl --selftest)

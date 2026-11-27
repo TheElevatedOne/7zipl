@@ -1,12 +1,11 @@
 pkgbase = 7zipl-bin
-	pkgdesc = 7-Zip File Manager for Linux with a plain GTK 4 interface, on the 7-Zip engine (prebuilt)
+	pkgdesc = 7-Zip File Manager for Linux with a plain GTK 4 interface, using the system 7-Zip (prebuilt)
 	pkgver = 0.1.0
 	pkgrel = 1
 	url = https://github.com/TheElevatedOne/7zipl
 	arch = x86_64
 	license = LGPL-2.1-or-later
-	license = BSD-3-Clause
-	license = LicenseRef-UnRAR
+	depends = 7zip
 	depends = gcc-libs
 	depends = glibc
 	depends = glib2

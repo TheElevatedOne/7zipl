@@ -90,6 +90,11 @@ void activate(GtkApplication *app, AppState *st)
         auto w = std::make_unique<MainWindow>(app);
         w->open_path(files.empty() ? std::string() : files[0]);
         w->present();
+        if (!available())
+            show_message(w->window(), "7-Zip not found",
+                         "7zipl needs 7-Zip to open and create archives, but neither 7zz nor 7z was found.\n\n"
+                         "Install your distribution's 7zip package (Arch: 7zip, Debian/Ubuntu: 7zip, Fedora: 7zip).",
+                         true);
         if (!o.screenshot.empty()) {
             struct S {
                 GtkWidget *w;

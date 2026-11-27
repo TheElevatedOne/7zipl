@@ -15,7 +15,7 @@ DESTDIR="$stage/install" cmake --install "$build" --strip >/dev/null
 test -x "$stage/install/usr/bin/7zipl"
 mkdir -p "$stage/$name"
 cp -a "$stage/install/usr/." "$stage/$name/"
-cp "$root/README.md" "$root/CHANGELOG.md" "$root/DOC/License.txt" "$root/DOC/unRarLicense.txt" "$stage/$name/"
+cp "$root/README.md" "$root/CHANGELOG.md" "$root/COPYING" "$stage/$name/"
 mkdir -p "$root/dist"
 tar --owner=0 --group=0 -C "$stage" -czf "$root/dist/$name.tar.gz" "$name"
 (cd "$root/dist" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")

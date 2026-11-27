@@ -92,6 +92,7 @@ bool wait_for(const std::function<bool()> &pred, int timeout_ms = 20000)
 
 void engine_tests(const std::string &tmp)
 {
+    check(available(), "7-Zip found: " + program());
     check(!formats().empty(), "formats loaded");
     const auto up = update_formats();
     check(std::find(up.begin(), up.end(), "7z") != up.end(), "7z can be created");

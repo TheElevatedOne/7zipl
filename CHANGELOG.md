@@ -2,8 +2,9 @@
 
 ## 0.1.0
 
-- First release: the 7-Zip File Manager rewritten with plain GTK 4 for Linux, on the unchanged 7-Zip 26.06
-  engine linked in-process.
+- First release: the 7-Zip File Manager rewritten with plain GTK 4 for Linux. It runs the 7-Zip from the
+  distribution's `7zip` package (`7zz` or `7z`) for every archive operation; passwords go to 7-Zip's prompt, not
+  the command line.
 - Browse folders and archives (nested archives too), create archives with the Add to Archive dialog, extract,
   test, add, delete and rename inside archives, checksums, favorites, AES-256 encryption.
 - 2 panels (F9), Large Icons / Small Icons / List / Details, Flat View, Auto Refresh, Folders History (Alt+F12),

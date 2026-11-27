@@ -7,8 +7,9 @@
   <summary>7-Zip File Manager with a native GTK 4 interface</summary>
   <description>
     <p>
-      7zipl is the 7-Zip File Manager for Linux. It keeps 7-Zip's own engine and its window layout,
-      dialogs and keyboard shortcuts, with a plain GTK 4 interface that follows the system theme.
+      7zipl is the 7-Zip File Manager for Linux. It keeps the File Manager's window layout, dialogs and
+      keyboard shortcuts, with a plain GTK 4 interface that follows the system theme. Archives are handled
+      by the 7-Zip installed from your distribution's 7zip package.
     </p>
     <ul>
       <li>Browse folders and archives, including archives inside archives</li>

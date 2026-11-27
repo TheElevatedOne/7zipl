@@ -49,7 +49,10 @@ int main(int argc, char **argv)
 
     if (version) {
         szl::init(argv[0]);
-        std::printf("7zipl %s (7-Zip engine %s)\n", SZL_VERSION, szl::version().c_str());
+        if (szl::available())
+            std::printf("7zipl %s (7-Zip %s, %s)\n", SZL_VERSION, szl::version().c_str(), szl::program().c_str());
+        else
+            std::printf("7zipl %s (7-Zip not found: install the 7zip package)\n", SZL_VERSION);
         return 0;
     }
     if (profile) szl::set_config_dir(profile);
